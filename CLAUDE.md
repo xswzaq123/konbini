@@ -116,6 +116,7 @@ The version lives in `src\AppInfo.cs` (`AppInfo.Version`) and in `installer\Setu
   | `BeforeRun` | Runs on the UI thread before processing; copy UI values into locals here, because workers must not touch controls |
   | `Process(src, baseOut) -> status string` | Converts one file |
   | `ReservePath(path)` | Returns a unique output path; always use it, and never overwrite the source |
+  | `AutoSuffix` | Builds a suffix that describes the settings, e.g. `_upscaled-4x`, `_compressed-q75`, `_resized-fit-1920x1080`. Changing any option control refreshes it (`HookOptionChanges`). Typing in the box makes the suffix custom, and "Use automatic" switches back. Call `RefreshSuffix()` for changes the hook can't see, such as a colour picker |
 | `Thumbnail`, `MaxWorkers`, `DetailsHeader` | Custom thumbnail (video frames), parallelism limit (video uses 1), and the column-2 header |
 
 - **Converter pipeline** (`src/Convert/`):

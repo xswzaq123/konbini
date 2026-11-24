@@ -88,13 +88,13 @@ Run-Panel $p
 $r = Results $p
 Check 'compress jpg' (($r.GetEnumerator() | Where-Object { $_.Key -like 'photo.jpg|*' }).Value -match '→') ($r | Out-String)
 Check 'compress broken reports error' (($r.GetEnumerator() | Where-Object { $_.Key -like 'broken.jpg|*' }).Value -like 'Error*')
-Check 'jpg output exists' (Test-Path "$work\photo_compressed.jpg")
-Check 'png output exists' (Test-Path "$work\photo_compressed.png")
+Check 'jpg output exists' (Test-Path "$work\photo_compressed-q75.jpg")
+Check 'png output exists' (Test-Path "$work\photo_compressed-q75.png")
 
 # --- Compressor: target size 150 KB
 $bySize = Find-Ctl $p { param($x) $x -is [Windows.Forms.RadioButton] -and $x.Text -like 'Target*' }; $bySize.Checked = $true
 $num = Find-Ctl $p { param($x) $x -is ($asm.GetType("Konbini.NumBox")) -and $x.Enabled -and $x.Value -eq 200 }; $num.Value = 150
-$sfx = Find-Ctl $p { param($x) $x -is [Windows.Forms.TextBox] -and $x.Text -eq '_compressed' }; $sfx.Text = '_150k'
+$sfx = Find-Ctl $p { param($x) $x -is [Windows.Forms.TextBox] -and $x.Text -like '_compressed*' }; $sfx.Text = '_150k'
 Run-Panel $p
 foreach ($f in 'photo_150k.jpg', 'wide_150k.png', 'photo_150k.png') {
     if (Test-Path "$work\$f") { $len = (Get-Item "$work\$f").Length; Check "target size $f <= 150 KB" ($len -le 150KB) "$len bytes" }
@@ -115,12 +115,12 @@ $p = Open-Tool 'Image Resizer'
 $p.GetType().GetMethod('AddPaths', $nonPub).Invoke($p, @(, [string[]]@("$work\photo.jpg", "$work\wide.png", "$work\small.bmp")))
 Run-Panel $p
 function Dim($f) { $i = [Drawing.Image]::FromFile($f); $s = "$($i.Width)x$($i.Height)"; $i.Dispose(); $s }
-Check 'resize fit photo' ((Dim "$work\photo_resized.jpg") -eq '1440x1080')
-Check 'resize fit wide' ((Dim "$work\wide_resized.png") -eq '1600x400')
-Check 'resize small not enlarged' ((Dim "$work\small_resized.bmp") -eq '300x200')
+Check 'resize fit photo' ((Dim "$work\photo_resized-fit-1920x1080.jpg") -eq '1440x1080')
+Check 'resize fit wide' ((Dim "$work\wide_resized-fit-1920x1080.png") -eq '1600x400')
+Check 'resize small not enlarged' ((Dim "$work\small_resized-fit-1920x1080.bmp") -eq '300x200')
 $mode = Find-Ctl $p { param($x) $x -is [Windows.Forms.ComboBox] -and $x.Items.Contains('Percentage') }; $mode.SelectedIndex = 2
 $fmt = Find-Ctl $p { param($x) $x -is [Windows.Forms.ComboBox] -and $x.Items.Contains('Same as original') }; $fmt.SelectedItem = 'PNG'
-$rs = Find-Ctl $p { param($x) $x -is [Windows.Forms.TextBox] -and $x.Text -eq '_resized' }; $rs.Text = '_half'
+$rs = Find-Ctl $p { param($x) $x -is [Windows.Forms.TextBox] -and $x.Text -like '_resized*' }; $rs.Text = '_half'
 Run-Panel $p
 Check 'resize 50% to png' ((Dim "$work\photo_half.png") -eq '2000x1500')
 

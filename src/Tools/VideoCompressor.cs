@@ -61,6 +61,18 @@ namespace Konbini
 
             var panel = new BatchImagePanel("Compress videos", opts) { Suffix = "_compressed", MaxWorkers = 1 };
             panel.Noun = "video"; panel.DetailsHeader = "Details";
+            // e.g. _compressed-sharing, _compressed-under10mb; Custom: _compressed-h265-crf28-720p
+            string[] slugs = { "balanced", "sharing", "messaging", "1280w", "quality", "under10mb", "under25mb", "archive" };
+            string[] resSlugs = { "", "2160p", "1440p", "1080p", "720p", "480p", "360p", "1280w" };
+            panel.AutoSuffix = () =>
+            {
+                int t = template.SelectedIndex;
+                if (t >= 0 && t < VideoCompress.Templates.Length && t < slugs.Length) return "_compressed-" + slugs[t];
+                string s = "_compressed-" + (codec.SelectedIndex == 1 ? "h265" : "h264")
+                    + (sizeMode.SelectedIndex == 1 ? "-" + mb.Value + "mb" : "-crf" + crf.Value);
+                if (res.SelectedIndex > 0 && res.SelectedIndex < resSlugs.Length) s += "-" + resSlugs[res.SelectedIndex];
+                return s;
+            };
             var infos = new System.Collections.Concurrent.ConcurrentDictionary<string, ProbeInfo>(StringComparer.OrdinalIgnoreCase);
             panel.Accept = p =>
             {

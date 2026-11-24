@@ -55,6 +55,9 @@ namespace Konbini
             keep.Visible = false;
 
             var panel = new BatchImagePanel("Resize images", opts) { Suffix = "_resized" };
+            // e.g. _resized-fit-1920x1080, _resized-800x600, _resized-50pct
+            panel.AutoSuffix = () => "_resized-" + (mode.SelectedIndex == 2 ? pct.Value + "pct"
+                : (mode.SelectedIndex == 0 ? "fit-" : "") + w.Value + "x" + h.Value);
 
             // Linked sizing: editing one dimension updates the other to keep the locked ratio (W / H).
             double ratio = 16.0 / 9.0; bool syncing = false;

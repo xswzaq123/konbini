@@ -58,6 +58,11 @@ namespace Konbini
             unit.SelectedIndexChanged += delegate { bySize.Checked = true; };
 
             var panel = new BatchImagePanel("Compress images", opts) { Suffix = "_compressed" };
+            // e.g. _compressed-q75, _compressed-200kb, _compressed-q75-max2560
+            panel.AutoSuffix = () => "_compressed-"
+                + (bySize.Checked ? sizeVal.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + (unit.SelectedIndex == 1 ? "mb" : "kb") : "q" + quality.Value)
+                + (maxSide.Checked ? "-max" + maxPx.Value : "");
+            quality.ValueChanged += delegate { panel.RefreshSuffix(); };
 
             int sQ = 75, sMax = 0; long sTarget = 0; bool sJpeg = false, sKeep = true;
             panel.BeforeRun = delegate

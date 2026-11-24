@@ -457,8 +457,18 @@ namespace Konbini
             outFlow.Controls.Add(outDir, 0, 1); outFlow.Controls.Add(browse, 1, 1);
             var sfxRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
             sfxRow.Controls.Add(new Label { Text = "File name suffix:", AutoSize = true, Margin = new Padding(0, 6, 4, 0) });
-            suffix = new TextBox { Width = 110 };
+            suffix = new TextBox { Width = 170 };
             sfxRow.Controls.Add(suffix);
+            // "Automatic" suffixes describe the settings (e.g. _upscaled-4x). Typing makes it custom; the link goes back.
+            autoLink = new LinkLabel { Text = "Use automatic", AutoSize = true, Visible = false, Margin = new Padding(6, 6, 0, 0), LinkBehavior = LinkBehavior.HoverUnderline };
+            autoLink.LinkClicked += delegate { customSuffix = false; RefreshSuffix(); };
+            sfxRow.Controls.Add(autoLink);
+            suffix.TextChanged += delegate
+            {
+                if (settingSuffix || autoSuffix == null) return;
+                customSuffix = true; autoLink.Visible = true;
+            };
+            HookOptionChanges(options);
             outFlow.Controls.Add(sfxRow, 0, 2); outFlow.SetColumnSpan(sfxRow, 2);
             outBox.Controls.Add(outFlow);
             bottom.Controls.Add(outBox, 1, 0);
@@ -516,7 +526,52 @@ namespace Konbini
             RemoveItems(List.Items.Cast<ListViewItem>().ToList());
         }
 
-        public string Suffix { get { return suffix.Text; } set { suffix.Text = value; } }
+        public string Suffix { get { return suffix.Text; } set { settingSuffix = true; suffix.Text = value; settingSuffix = false; } }
+
+        private LinkLabel autoLink;
+        private Func<string> autoSuffix;
+        private bool customSuffix, settingSuffix;
+
+        /// <summary>Builds a suffix that says what the current settings do ("_upscaled-4x"). The suffix box follows it
+        /// whenever an option changes, until the user types their own; "Use automatic" switches back.</summary>
+        public Func<string> AutoSuffix { get { return autoSuffix; } set { autoSuffix = value; RefreshSuffix(); } }
+        /// <summary>True when the user typed their own suffix.</summary>
+        public bool CustomSuffix { get { return customSuffix; } }
+
+        public void RefreshSuffix()
+        {
+            if (autoSuffix == null || customSuffix) { if (autoLink != null) autoLink.Visible = customSuffix && autoSuffix != null; return; }
+            string s;
+            try { s = SafeSuffix(autoSuffix()); } catch (Exception) { return; }
+            Suffix = s;
+            autoLink.Visible = false;
+        }
+
+        /// <summary>Lower-case, file-name-safe: spaces become dashes, anything else odd is dropped.</summary>
+        public static string SafeSuffix(string s)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (char c in (s ?? "").ToLowerInvariant())
+            {
+                if (c == ' ') { if (sb.Length > 0 && sb[sb.Length - 1] != '-') sb.Append('-'); }
+                else if (char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == '.') sb.Append(c);
+            }
+            return sb.ToString().TrimEnd('-', '.');
+        }
+
+        // Any option change (combo, checkbox, number, slider, text) refreshes the automatic suffix.
+        private void HookOptionChanges(Control c)
+        {
+            if (c == null) return;
+            EventHandler h = delegate { RefreshSuffix(); };
+            if (c is ComboBox) ((ComboBox)c).SelectedIndexChanged += h;
+            else if (c is CheckBox) ((CheckBox)c).CheckedChanged += h;
+            else if (c is RadioButton) ((RadioButton)c).CheckedChanged += h;
+            else if (c is TrackBar) ((TrackBar)c).ValueChanged += h;
+            else if (c is NumBox) { ((NumBox)c).ValueChanged += h; return; }
+            else if (c is TextBox) ((TextBox)c).TextChanged += h;
+            foreach (Control child in c.Controls) HookOptionChanges(child);
+        }
 
         private void AddPaths(IEnumerable<string> paths)
         {
