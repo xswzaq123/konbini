@@ -114,6 +114,19 @@ namespace Konbini
             };
 
             var panel = new BatchImagePanel("Remove backgrounds", opts) { Suffix = "_nobg" };
+            // e.g. _nobg, _bg-ffffff, _bg-blur, _bg-image, _mask
+            panel.AutoSuffix = () =>
+            {
+                switch (bgMode.SelectedIndex)
+                {
+                    case 1: return "_bg-" + bgColor.R.ToString("x2") + bgColor.G.ToString("x2") + bgColor.B.ToString("x2");
+                    case 2: return "_bg-blur";
+                    case 3: return "_bg-image";
+                    case 4: return "_mask";
+                    default: return "_nobg";
+                }
+            };
+            swatch.BackColorChanged += delegate { panel.RefreshSuffix(); };
 
             BgModel sModel = BgModels.Standard;
             BgMode sMode = BgMode.Transparent; BgPrecision sPrec = BgPrecision.Automatic; Color sColor = Color.White;

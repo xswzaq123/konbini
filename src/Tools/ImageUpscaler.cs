@@ -33,6 +33,8 @@ namespace Konbini
             opts.Controls.Add(hint, 0, 2); opts.SetColumnSpan(hint, 4);
 
             var panel = new BatchImagePanel("Upscale images", opts) { Suffix = "_upscaled" };
+            // e.g. _upscaled-2x, _upscaled-4x-fast
+            panel.AutoSuffix = () => "_upscaled-" + (scale.SelectedIndex + 2) + "x" + (mode.SelectedIndex == 1 ? "-fast" : "");
 
             int sScale = 2, sMode = 0, sFmt = 0, sQ = 92;
             panel.BeforeRun = delegate

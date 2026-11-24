@@ -87,6 +87,16 @@ The version lives in `src\AppInfo.cs` (`AppInfo.Version`) and in `installer\Setu
 ## Architecture
 
 - **Shell:** `src/Program.cs`. `MainForm` has a sidebar (search box, owner-drawn nav `ListBox` grouped by `ITool.Category`, Settings button) and a content panel. Each page is built once with `Page(title, desc, body)`, cached in `views`, and recoloured in place when the theme changes. The page's `TableLayoutPanel` columns must use `Percent`, never the default AutoSize, so content can't push the page wider than the window.
+- **Home page** (`src/Home.cs`): the startup page, and the first sidebar item. `HomeTool` is an `ITool`, so the busy guard, clear-on-leave and flicker-free switching all apply to it.
+  - `HomeSuggest.Analyse` expands folders (up to 10,000 files) and classifies each file off the UI thread. It uses the same rules the tools' batches use: `ImageUtil.IsImage` for the image tools, `FileDetector` category Video for Video Compressor, and `Converters.TargetsFor` for File Converter.
+  - **Simple tools run right on Home.** These are the ones with a `Quick` verb in `HomeSuggest.Info` (Compress, Upscale, Cut out).
+    - `HomeView.RunQuick` borrows the tool's own `BatchImagePanel` through `MainForm.PanelFor`, which builds the page off-screen.
+    - It uses the panel's `AddFiles`, `StartRun`, `RunProgress`, `RunCompleted`, `StopRun` and `LastOutputs`, so the tool's real processing and current settings are used.
+    - Output goes next to the originals, using the tool's suffix.
+    - The batch is cleared afterwards. `HomeView.Busy` blocks switching pages while it runs.
+  - **Tools with real choices** (Resizer, Video Compressor, File Converter) show "Open tool". Every quick card also has a "More options" link. Both call `MainForm.OpenToolWith`, which opens the tool and passes the files to `AddFiles`.
+  - **When adding a tool,** give it a reason and an order in `HomeSuggest.Info`, and a classification rule in `Analyse`.
+  - Tested by `tests\home.ps1`.
 - **Adding a tool:** implement `ITool` (`Name`, `Category`, `Description`, `CreateView()`), then register it in `ToolRegistry.All()` in `src/Core.cs`.
 - **`BatchImagePanel`** (`src/Core.cs`) is the shared batch UI that every tool reuses. It provides:
   - a toolbar for add, add folder, remove and clear
@@ -106,6 +116,7 @@ The version lives in `src\AppInfo.cs` (`AppInfo.Version`) and in `installer\Setu
   | `BeforeRun` | Runs on the UI thread before processing; copy UI values into locals here, because workers must not touch controls |
   | `Process(src, baseOut) -> status string` | Converts one file |
   | `ReservePath(path)` | Returns a unique output path; always use it, and never overwrite the source |
+  | `AutoSuffix` | Builds a suffix that describes the settings, e.g. `_upscaled-4x`, `_compressed-q75`, `_resized-fit-1920x1080`. Changing any option control refreshes it (`HookOptionChanges`). Typing in the box makes the suffix custom, and "Use automatic" switches back. Call `RefreshSuffix()` for changes the hook can't see, such as a colour picker |
 | `Thumbnail`, `MaxWorkers`, `DetailsHeader` | Custom thumbnail (video frames), parallelism limit (video uses 1), and the column-2 header |
 
 - **Converter pipeline** (`src/Convert/`):

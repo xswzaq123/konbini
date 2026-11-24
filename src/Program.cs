@@ -22,6 +22,7 @@ namespace Konbini
     public class MainForm : Form
     {
         private readonly List<ITool> tools = ToolRegistry.All();
+        private readonly HomeTool home = new HomeTool();
         private readonly Panel content;
         private readonly ListBox nav;
         private readonly TextBox search;
@@ -41,7 +42,11 @@ namespace Konbini
 
             sidebar = new Panel { Dock = DockStyle.Left, Width = 232, Padding = new Padding(14, 16, 14, 12), Tag = Theme.SidebarTag };
             var brand = new Label { Text = "◆ Konbini", Dock = DockStyle.Top, Height = 46, ForeColor = Color.White,
-                Font = new Font("Segoe UI Semibold", 14f), Padding = new Padding(2, 0, 0, 0) };
+                Font = new Font("Segoe UI Semibold", 14f), Padding = new Padding(2, 0, 0, 0), Cursor = Cursors.Hand };
+            brand.Click += delegate { GoHome(); };
+            HomeTool.Tools = tools;
+            HomeTool.Open = OpenToolWith;
+            HomeTool.PanelFor = PanelFor;
             // Borderless search field inside a padded "pill" so it doesn't get the harsh system border.
             searchBox = new Panel { Dock = DockStyle.Top, Height = 34, Padding = new Padding(10, 8, 10, 6) };
             search = new TextBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Font = Theme.Body };
@@ -78,7 +83,7 @@ namespace Konbini
 
             search.TextChanged += delegate { Populate(); };
             Populate();
-            if (nav.Items.Count > 0) nav.SelectedIndex = FirstToolIndex();
+            GoHome();
 
             ApplyTheme();
             Settings.Changed += OnSettingsChanged;
@@ -113,6 +118,7 @@ namespace Konbini
             var sel = nav.SelectedItem;
             nav.BeginUpdate();
             nav.Items.Clear();
+            if (q == "" || "home".IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0) nav.Items.Add(home);
             foreach (var g in tools.Where(t => q == "" || (t.Name + " " + t.Category + " " + t.Description)
                          .IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0).GroupBy(t => t.Category).OrderBy(g => g.Key))
             {
@@ -151,7 +157,7 @@ namespace Konbini
             else
             {
                 if (selected) using (var a = new SolidBrush(Theme.Accent)) e.Graphics.FillRectangle(a, e.Bounds.X, e.Bounds.Y + 6, 3, e.Bounds.Height - 12);
-                TextRenderer.DrawText(e.Graphics, tool.Name, Theme.Body,
+                TextRenderer.DrawText(e.Graphics, tool == home ? "⌂  Home" : tool.Name, tool == home ? Theme.Bold : Theme.Body,
                     new Rectangle(e.Bounds.X + 14, e.Bounds.Y, e.Bounds.Width - 14, e.Bounds.Height),
                     selected ? Color.White : Theme.SidebarText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
             }
@@ -188,12 +194,54 @@ namespace Konbini
         private ITool currentTool;
         private bool reverting;
 
+        /// <summary>Shows the Home page (startup, the sidebar's Home item and the logo).</summary>
+        private void GoHome()
+        {
+            if (currentTool == home) return;
+            if (currentTool != null && BlockedByRun()) return;
+            SelectInNav(home);
+        }
+
+        // Selecting in the list fires SelectedIndexChanged, which shows the page; if the item is filtered out, show it directly.
+        private void SelectInNav(ITool t)
+        {
+            if (nav.Items.Contains(t)) nav.SelectedItem = t;
+            if (currentTool != t) { reverting = true; try { nav.ClearSelected(); } finally { reverting = false; } ShowTool(t); }
+        }
+
+        /// <summary>A tool's batch panel, building its page off-screen if it hasn't been shown yet. Home borrows it to
+        /// run simple actions in place, so they use exactly the tool's own processing and current settings.</summary>
+        private BatchImagePanel PanelFor(ITool tool)
+        {
+            Control view;
+            if (!views.TryGetValue(tool, out view))
+            {
+                views[tool] = view = Page(tool.Name, tool.Description, tool.CreateView());
+                Theme.Apply(view);
+            }
+            var panel = Descendants(view).OfType<BatchImagePanel>().FirstOrDefault();
+            if (panel != null && !panel.IsHandleCreated) { var h = panel.Handle; }   // progress is marshalled through its handle
+            return panel;
+        }
+
+        /// <summary>From the Home page: open a tool with the dropped files already in its batch.</summary>
+        private void OpenToolWith(ITool tool, IList<string> files)
+        {
+            if (currentTool != tool && currentTool != null && currentTool != home && BlockedByRun()) return;
+            SelectInNav(tool);
+            Control view;
+            if (files.Count == 0 || !views.TryGetValue(tool, out view)) return;
+            var panel = Descendants(view).OfType<BatchImagePanel>().FirstOrDefault();
+            if (panel != null) panel.AddFiles(files);
+        }
+
         // A running batch keeps its page: switching away would hide its progress and (below) clear its list.
         private bool BlockedByRun()
         {
             if (content.Controls.Count == 0) return false;
-            if (!Descendants(content.Controls[0]).OfType<BatchImagePanel>().Any(p => p.Busy)) return false;
-            MessageBox.Show(this, "A task is running. Wait for it to finish, or press Stop, before switching tools.", "Konbini",
+            var page = Descendants(content.Controls[0]).ToList();
+            if (!page.OfType<BatchImagePanel>().Any(p => p.Busy) && !page.OfType<HomeView>().Any(h => h.Busy)) return false;
+            MessageBox.Show(this, "A task is running. Wait for it to finish before switching tools.", "Konbini",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return true;
         }

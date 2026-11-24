@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -457,12 +457,23 @@ namespace Konbini
             outFlow.Controls.Add(outDir, 0, 1); outFlow.Controls.Add(browse, 1, 1);
             var sfxRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
             sfxRow.Controls.Add(new Label { Text = "File name suffix:", AutoSize = true, Margin = new Padding(0, 6, 4, 0) });
-            suffix = new TextBox { Width = 110 };
+            suffix = new TextBox { Width = 170 };
             sfxRow.Controls.Add(suffix);
+            // "Automatic" suffixes describe the settings (e.g. _upscaled-4x). Typing makes it custom; the link goes back.
+            autoLink = new LinkLabel { Text = "Use automatic", AutoSize = true, Visible = false, Margin = new Padding(6, 6, 0, 0), LinkBehavior = LinkBehavior.HoverUnderline };
+            autoLink.LinkClicked += delegate { customSuffix = false; RefreshSuffix(); };
+            sfxRow.Controls.Add(autoLink);
+            suffix.TextChanged += delegate
+            {
+                if (settingSuffix || autoSuffix == null) return;
+                customSuffix = true; autoLink.Visible = true;
+            };
+            HookOptionChanges(options);
             outFlow.Controls.Add(sfxRow, 0, 2); outFlow.SetColumnSpan(sfxRow, 2);
             outBox.Controls.Add(outFlow);
             bottom.Controls.Add(outBox, 1, 0);
             root.Controls.Add(bottom, 0, 2);
+            bottomPart = bottom;
 
             // Run row
             var runRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, Margin = new Padding(0, 8, 0, 0) };
@@ -474,6 +485,7 @@ namespace Konbini
             runBtn = Theme.PrimaryButton(runText);
             runRow.Controls.Add(status, 0, 0); runRow.Controls.Add(progress, 1, 0); runRow.Controls.Add(runBtn, 2, 0);
             root.Controls.Add(runRow, 0, 3);
+            runPart = runRow;
 
             // Events
             sameFolder.CheckedChanged += delegate { outDir.Visible = browse.Visible = !sameFolder.Checked; };
@@ -506,6 +518,15 @@ namespace Konbini
             runBtn.Click += delegate { Run(); };
         }
 
+        private Control bottomPart, runPart;
+
+        /// <summary>Just the file list and its toolbar (add, remove, clear, list/thumbnails): no options, output or Run.
+        /// The Home page uses this to show what was dropped.</summary>
+        public void ShowListOnly() { bottomPart.Visible = false; runPart.Visible = false; }
+
+        /// <summary>Adds files or folders to the batch (same rules as dropping them on the list). Used by the Home page.</summary>
+        public void AddFiles(IEnumerable<string> paths) { AddPaths(paths); }
+
         /// <summary>Removes every file from the batch and frees its thumbnails (Clear button; also when leaving the tool).</summary>
         public void ClearFiles()
         {
@@ -513,7 +534,52 @@ namespace Konbini
             RemoveItems(List.Items.Cast<ListViewItem>().ToList());
         }
 
-        public string Suffix { get { return suffix.Text; } set { suffix.Text = value; } }
+        public string Suffix { get { return suffix.Text; } set { settingSuffix = true; suffix.Text = value; settingSuffix = false; } }
+
+        private LinkLabel autoLink;
+        private Func<string> autoSuffix;
+        private bool customSuffix, settingSuffix;
+
+        /// <summary>Builds a suffix that says what the current settings do ("_upscaled-4x"). The suffix box follows it
+        /// whenever an option changes, until the user types their own; "Use automatic" switches back.</summary>
+        public Func<string> AutoSuffix { get { return autoSuffix; } set { autoSuffix = value; RefreshSuffix(); } }
+        /// <summary>True when the user typed their own suffix.</summary>
+        public bool CustomSuffix { get { return customSuffix; } }
+
+        public void RefreshSuffix()
+        {
+            if (autoSuffix == null || customSuffix) { if (autoLink != null) autoLink.Visible = customSuffix && autoSuffix != null; return; }
+            string s;
+            try { s = SafeSuffix(autoSuffix()); } catch (Exception) { return; }
+            Suffix = s;
+            autoLink.Visible = false;
+        }
+
+        /// <summary>Lower-case, file-name-safe: spaces become dashes, anything else odd is dropped.</summary>
+        public static string SafeSuffix(string s)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (char c in (s ?? "").ToLowerInvariant())
+            {
+                if (c == ' ') { if (sb.Length > 0 && sb[sb.Length - 1] != '-') sb.Append('-'); }
+                else if (char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == '.') sb.Append(c);
+            }
+            return sb.ToString().TrimEnd('-', '.');
+        }
+
+        // Any option change (combo, checkbox, number, slider, text) refreshes the automatic suffix.
+        private void HookOptionChanges(Control c)
+        {
+            if (c == null) return;
+            EventHandler h = delegate { RefreshSuffix(); };
+            if (c is ComboBox) ((ComboBox)c).SelectedIndexChanged += h;
+            else if (c is CheckBox) ((CheckBox)c).CheckedChanged += h;
+            else if (c is RadioButton) ((RadioButton)c).CheckedChanged += h;
+            else if (c is TrackBar) ((TrackBar)c).ValueChanged += h;
+            else if (c is NumBox) { ((NumBox)c).ValueChanged += h; return; }
+            else if (c is TextBox) ((TextBox)c).TextChanged += h;
+            foreach (Control child in c.Controls) HookOptionChanges(child);
+        }
 
         private void AddPaths(IEnumerable<string> paths)
         {
@@ -639,7 +705,21 @@ namespace Konbini
         // Outputs created for the item a worker is currently processing, deleted again if that item fails.
         private readonly ThreadLocal<List<string>> itemOutputs = new ThreadLocal<List<string>>();
         public bool Busy { get; private set; }
-        public void RequestCancel() { cancelRequested = true; status.Text = "Stopping…"; }
+        /// <summary>Stop after the files in progress and close the window (used when quitting mid-run).</summary>
+        public void RequestCancel() { closeWhenStopped = true; cancelRequested = true; status.Text = "Stopping…"; }
+        /// <summary>Stop after the files in progress; the window stays open.</summary>
+        public void StopRun() { if (Busy) { cancelRequested = true; status.Text = "Stopping…"; } }
+        private volatile bool closeWhenStopped;
+
+        /// <summary>Raised on the UI thread after each file: (files done, total).</summary>
+        public event Action<int, int> RunProgress;
+        /// <summary>Raised on the UI thread when a run ends: (succeeded, failed, stopped early).</summary>
+        public event Action<int, int, bool> RunCompleted;
+        /// <summary>Output files written by the last run.</summary>
+        public List<string> LastOutputs { get; private set; }
+
+        /// <summary>Runs the batch with the current settings (as the Run button does). False if it didn't start.</summary>
+        public bool StartRun() { Run(); return Busy; }
 
         public static string FriendlyError(Exception ex)
         {
@@ -711,7 +791,7 @@ namespace Konbini
                 MessageBox.Show(this, "No suffix is set, so originals with the same format will be overwritten. Continue?",
                     "Konbini", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             allowOverwrite = WarnOnEmptySuffix && dir == null && string.IsNullOrEmpty(sfx);
-            cancelRequested = false;
+            cancelRequested = false; closeWhenStopped = false;
 
             var items = List.Items.Cast<ListViewItem>().Select(i => new KeyValuePair<ListViewItem, string>(i, (string)i.Tag)).ToList();
             foreach (var kv in items) kv.Key.SubItems[3].Text = "Waiting…";
@@ -743,7 +823,7 @@ namespace Konbini
                         itemOutputs.Value = null;
                     }
                     string r = result;
-                    try { BeginInvoke((Action)(() => { kv.Key.SubItems[3].Text = r; kv.Key.ToolTipText = src + "\n" + r; progress.Value++; })); }
+                    try { BeginInvoke((Action)(() => { kv.Key.SubItems[3].Text = r; kv.Key.ToolTipText = src + "\n" + r; progress.Value++; if (RunProgress != null) RunProgress(progress.Value, progress.Maximum); })); }
                     catch (InvalidOperationException) { }
                 });
                 try
@@ -751,9 +831,12 @@ namespace Konbini
                     BeginInvoke((Action)(() =>
                     {
                         SetBusy(false);
-                        if (cancelRequested) { var form = FindForm(); if (form != null) form.Close(); return; }
-                        status.Text = "Done: " + ok + " succeeded" + (fail > 0 ? ", " + fail + " failed" : "") +
+                        lock (claimed) LastOutputs = claimed.Where(File.Exists).ToList();
+                        bool stopped = cancelRequested;
+                        if (stopped && closeWhenStopped) { var form = FindForm(); if (form != null) form.Close(); return; }
+                        status.Text = (stopped ? "Stopped: " : "Done: ") + ok + " succeeded" + (fail > 0 ? ", " + fail + " failed" : "") +
                                       " in " + (sw.ElapsedMilliseconds / 1000.0).ToString("0.0") + " s.";
+                        if (RunCompleted != null) RunCompleted(ok, fail, stopped);
                     }));
                 }
                 catch (InvalidOperationException) { }
