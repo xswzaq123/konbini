@@ -33,12 +33,28 @@ $names = @($a.Suggestions | ForEach-Object { $_.Tool.Name })
 Check 'suggestions ordered' ($names[0] -eq 'File Converter' -and $names -contains 'Background Remover' -and $names.IndexOf('Image Compressor') -lt $names.IndexOf('Background Remover')) ($names -join ', ')
 $bg = $a.Suggestions | Where-Object { $_.Tool.Name -eq 'Background Remover' }
 Check 'bg remover takes the 3 images' ($bg.Files.Count -eq 3)
-$cards = @(); foreach ($c in (Find-Ctl $homeView { param($x) $x -is [Windows.Forms.FlowLayoutPanel] }).Controls) { $cards += $c }
+$cards = @(); foreach ($c in (Find-Ctl $homeView { param($x) $x -is [Windows.Forms.FlowLayoutPanel] -and $x.Controls.Count -gt 0 -and $x.Controls[0].GetType().Name -eq 'SuggestionCard' }).Controls) { $cards += $c }
 Check 'one card per suggestion' ($cards.Count -eq $a.Suggestions.Count) "$($cards.Count) cards"
 
-# Click "Background Remover": the tool opens with exactly those files
+# Simple vs. settings-heavy tools: one-click run button + "More options" link, or "Open with N files"
+$comp = $cards | Where-Object { $_.Heading -eq 'Image Compressor' }
+$resz = $cards | Where-Object { $_.Heading -eq 'Image Resizer' }
+Check 'compressor has a run button and a tool link' ($comp.MainButton.Text -eq 'Compress' -and $comp.Count -eq '3 images' -and $comp.MoreLink -ne $null) $comp.MainButton.Text
+Check 'resizer opens its tool instead' ($resz.MainButton.Text -like 'Open tool*' -and $resz.Count -eq '3 images' -and $resz.MoreLink -eq $null) $resz.MainButton.Text
+
+# One click: compress right on Home, saved next to the originals, never leaving Home
+$comp.MainButton.PerformClick()
+Check 'quick run finishes on Home' (WaitFor { $homeView.RunStatus -like 'Done*' } 60000) $homeView.RunStatus
+Check 'still on Home' ("$($nav.SelectedItem.Name)" -eq 'Home')
+$outs = @(Get-ChildItem $work -Recurse -File | Where-Object { $_.Name -like '*_compressed*' -or $_.Name -like '*_min*' -or ($_.BaseName -notin 'a','b','c','doc','data','mystery') })
+Check 'outputs next to the originals' ($outs.Count -eq 3) (($outs | ForEach-Object { $_.FullName.Substring($work.Length) }) -join ', ')
+Check 'originals untouched' ((Test-Path "$work\a.jpg") -and (Test-Path "$work\sub\c.png"))
+$outs | Remove-Item
+
+# "More options" on Background Remover: the tool opens with exactly those files
 $card = $cards | Where-Object { $_.Heading -eq 'Background Remover' }
-$card.GetType().GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($card, @([EventArgs]::Empty)); Pump 600
+$link = $card.MoreLink
+$link.GetType().GetMethod('OnLinkClicked', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($link, @([Windows.Forms.LinkLabelLinkClickedEventArgs](New-Object Windows.Forms.LinkLabelLinkClickedEventArgs $link.Links[0]))); Pump 600
 $panel = Find-Ctl $form { param($x) $x.GetType().Name -eq 'BatchImagePanel' -and $x.Visible }
 Check 'tool opened' ("$($nav.SelectedItem.Name)" -eq 'Background Remover')
 Check 'files in its batch' ($panel -ne $null -and $panel.Files.Length -eq 3) "files=$($panel.Files.Length)"

@@ -642,7 +642,21 @@ namespace Konbini
         // Outputs created for the item a worker is currently processing, deleted again if that item fails.
         private readonly ThreadLocal<List<string>> itemOutputs = new ThreadLocal<List<string>>();
         public bool Busy { get; private set; }
-        public void RequestCancel() { cancelRequested = true; status.Text = "Stopping…"; }
+        /// <summary>Stop after the files in progress and close the window (used when quitting mid-run).</summary>
+        public void RequestCancel() { closeWhenStopped = true; cancelRequested = true; status.Text = "Stopping…"; }
+        /// <summary>Stop after the files in progress; the window stays open.</summary>
+        public void StopRun() { if (Busy) { cancelRequested = true; status.Text = "Stopping…"; } }
+        private volatile bool closeWhenStopped;
+
+        /// <summary>Raised on the UI thread after each file: (files done, total).</summary>
+        public event Action<int, int> RunProgress;
+        /// <summary>Raised on the UI thread when a run ends: (succeeded, failed, stopped early).</summary>
+        public event Action<int, int, bool> RunCompleted;
+        /// <summary>Output files written by the last run.</summary>
+        public List<string> LastOutputs { get; private set; }
+
+        /// <summary>Runs the batch with the current settings (as the Run button does). False if it didn't start.</summary>
+        public bool StartRun() { Run(); return Busy; }
 
         public static string FriendlyError(Exception ex)
         {
@@ -714,7 +728,7 @@ namespace Konbini
                 MessageBox.Show(this, "No suffix is set, so originals with the same format will be overwritten. Continue?",
                     "Konbini", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             allowOverwrite = WarnOnEmptySuffix && dir == null && string.IsNullOrEmpty(sfx);
-            cancelRequested = false;
+            cancelRequested = false; closeWhenStopped = false;
 
             var items = List.Items.Cast<ListViewItem>().Select(i => new KeyValuePair<ListViewItem, string>(i, (string)i.Tag)).ToList();
             foreach (var kv in items) kv.Key.SubItems[3].Text = "Waiting…";
@@ -746,7 +760,7 @@ namespace Konbini
                         itemOutputs.Value = null;
                     }
                     string r = result;
-                    try { BeginInvoke((Action)(() => { kv.Key.SubItems[3].Text = r; kv.Key.ToolTipText = src + "\n" + r; progress.Value++; })); }
+                    try { BeginInvoke((Action)(() => { kv.Key.SubItems[3].Text = r; kv.Key.ToolTipText = src + "\n" + r; progress.Value++; if (RunProgress != null) RunProgress(progress.Value, progress.Maximum); })); }
                     catch (InvalidOperationException) { }
                 });
                 try
@@ -754,9 +768,12 @@ namespace Konbini
                     BeginInvoke((Action)(() =>
                     {
                         SetBusy(false);
-                        if (cancelRequested) { var form = FindForm(); if (form != null) form.Close(); return; }
-                        status.Text = "Done: " + ok + " succeeded" + (fail > 0 ? ", " + fail + " failed" : "") +
+                        lock (claimed) LastOutputs = claimed.Where(File.Exists).ToList();
+                        bool stopped = cancelRequested;
+                        if (stopped && closeWhenStopped) { var form = FindForm(); if (form != null) form.Close(); return; }
+                        status.Text = (stopped ? "Stopped: " : "Done: ") + ok + " succeeded" + (fail > 0 ? ", " + fail + " failed" : "") +
                                       " in " + (sw.ElapsedMilliseconds / 1000.0).ToString("0.0") + " s.";
+                        if (RunCompleted != null) RunCompleted(ok, fail, stopped);
                     }));
                 }
                 catch (InvalidOperationException) { }

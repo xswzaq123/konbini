@@ -46,6 +46,7 @@ namespace Konbini
             brand.Click += delegate { GoHome(); };
             HomeTool.Tools = tools;
             HomeTool.Open = OpenToolWith;
+            HomeTool.PanelFor = PanelFor;
             // Borderless search field inside a padded "pill" so it doesn't get the harsh system border.
             searchBox = new Panel { Dock = DockStyle.Top, Height = 34, Padding = new Padding(10, 8, 10, 6) };
             search = new TextBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Font = Theme.Body };
@@ -208,6 +209,21 @@ namespace Konbini
             if (currentTool != t) { reverting = true; try { nav.ClearSelected(); } finally { reverting = false; } ShowTool(t); }
         }
 
+        /// <summary>A tool's batch panel, building its page off-screen if it hasn't been shown yet. Home borrows it to
+        /// run simple actions in place, so they use exactly the tool's own processing and current settings.</summary>
+        private BatchImagePanel PanelFor(ITool tool)
+        {
+            Control view;
+            if (!views.TryGetValue(tool, out view))
+            {
+                views[tool] = view = Page(tool.Name, tool.Description, tool.CreateView());
+                Theme.Apply(view);
+            }
+            var panel = Descendants(view).OfType<BatchImagePanel>().FirstOrDefault();
+            if (panel != null && !panel.IsHandleCreated) { var h = panel.Handle; }   // progress is marshalled through its handle
+            return panel;
+        }
+
         /// <summary>From the Home page: open a tool with the dropped files already in its batch.</summary>
         private void OpenToolWith(ITool tool, IList<string> files)
         {
@@ -223,8 +239,9 @@ namespace Konbini
         private bool BlockedByRun()
         {
             if (content.Controls.Count == 0) return false;
-            if (!Descendants(content.Controls[0]).OfType<BatchImagePanel>().Any(p => p.Busy)) return false;
-            MessageBox.Show(this, "A task is running. Wait for it to finish, or press Stop, before switching tools.", "Konbini",
+            var page = Descendants(content.Controls[0]).ToList();
+            if (!page.OfType<BatchImagePanel>().Any(p => p.Busy) && !page.OfType<HomeView>().Any(h => h.Busy)) return false;
+            MessageBox.Show(this, "A task is running. Wait for it to finish before switching tools.", "Konbini",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return true;
         }

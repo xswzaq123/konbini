@@ -18,6 +18,9 @@ namespace Konbini
         public string Reason;
         public List<string> Files = new List<string>();
         public int Priority;   // lower = suggested first when file counts tie
+        /// <summary>Button text when the tool is simple enough to run right on Home with its current settings
+        /// ("Compress"); null when it needs choices first, so Home opens the tool instead.</summary>
+        public string Quick;
     }
 
     /// <summary>What the Home page found in a drop: counts per kind, suggestions, and files nothing can take.</summary>
@@ -50,15 +53,16 @@ namespace Konbini
     {
         public const int MaxFiles = 10000;
 
-        // Per tool: what it does for these files, and its order when several tools fit equally well.
+        // Per tool: order when several fit equally well, what it does, and the one-click button text for simple tools
+        // (empty = has real choices to make, e.g. a size or a target format, so Home opens the tool).
         private static readonly Dictionary<Type, string[]> Info = new Dictionary<Type, string[]>
         {
-            { typeof(ImageCompressorTool),   new[] { "0", "Make them smaller to share or upload" } },
-            { typeof(ImageResizerTool),      new[] { "1", "Change their width and height" } },
-            { typeof(ImageUpscalerTool),     new[] { "2", "Enlarge them with AI" } },
-            { typeof(BackgroundRemoverTool), new[] { "3", "Cut out the subject" } },
-            { typeof(VideoCompressorTool),   new[] { "0", "Shrink them for sharing or storage" } },
-            { typeof(FileConverterTool),     new[] { "9", "Convert them to another format" } },
+            { typeof(ImageCompressorTool),   new[] { "0", "Make them smaller to share", "Compress" } },
+            { typeof(ImageResizerTool),      new[] { "1", "Change their width and height", "" } },
+            { typeof(ImageUpscalerTool),     new[] { "2", "Enlarge them with AI", "Upscale" } },
+            { typeof(BackgroundRemoverTool), new[] { "3", "Cut out the subject", "Cut out" } },
+            { typeof(VideoCompressorTool),   new[] { "0", "Make them smaller to share", "" } },
+            { typeof(FileConverterTool),     new[] { "9", "Change their format", "" } },
         };
 
         /// <summary>Expands folders and classifies every file. Runs on a worker thread; checks <paramref name="cancelled"/>.</summary>
@@ -96,7 +100,8 @@ namespace Konbini
                 {
                     string[] info;
                     Info.TryGetValue(t, out info);
-                    byTool[tool] = s = new Suggestion { Tool = tool, Reason = info != null ? info[1] : tool.Description, Priority = info != null ? int.Parse(info[0]) : 5 };
+                    byTool[tool] = s = new Suggestion { Tool = tool, Reason = info != null ? info[1] : tool.Description, Priority = info != null ? int.Parse(info[0]) : 5,
+                        Quick = info != null && info[2] != "" ? info[2] : null };
                 }
                 return s;
             };
@@ -139,9 +144,11 @@ namespace Konbini
     /// <summary>The start page: drop anything, get suggestions, open a tool with the files already in its batch.</summary>
     public class HomeTool : ITool
     {
-        /// <summary>Set by MainForm: the tools to suggest, and how to open one with files.</summary>
+        /// <summary>Set by MainForm: the tools to suggest, how to open one with files, and how to get a tool's batch
+        /// (created off-screen if needed) so simple actions can run right on Home.</summary>
         public static IList<ITool> Tools = new List<ITool>();
         public static Action<ITool, IList<string>> Open;
+        public static Func<ITool, BatchImagePanel> PanelFor;
 
         public string Name { get { return "Home"; } }
         public string Category { get { return ""; } }
@@ -161,39 +168,69 @@ namespace Konbini
         private readonly Label unsupported;
         private CancellationTokenSource cts;
 
+        // The run strip: shown while (and after) a quick action runs on Home.
+        private readonly Card runCard;
+        private readonly Label runText;
+        private readonly SlimProgress runBar;
+        private readonly Button stopBtn, openFolderBtn, openToolBtn, doneBtn;
+        private BatchImagePanel runPanel;
+        private ITool runTool;
+        private List<string> runFiles, runOutputs;
+
         /// <summary>The last analysis shown (for tests).</summary>
         public DropAnalysis Last { get; private set; }
+        /// <summary>True while a quick action is running on Home (blocks switching pages, like a tool's batch).</summary>
+        public bool Busy { get { return runPanel != null && runPanel.Busy; } }
+        /// <summary>Status line of the last quick action (for tests).</summary>
+        public string RunStatus { get { return runText.Text; } }
 
         public HomeView()
         {
             Dock = DockStyle.Fill; AutoScroll = true;
-            body = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty };
+            body = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            body.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));
-            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.RowStyles.Add(new RowStyle(SizeType.Absolute, 200));
+            for (int i = 0; i < 4; i++) body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             zone = new DropZone { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 14) };
             zone.Browse += delegate { BrowseFiles(); };
             zone.Dropped += paths => Analyse(paths);
+
+            runCard = new Card { Title = "", Dock = DockStyle.Top, Visible = false, Margin = new Padding(0, 0, 0, 14) };
+            var runLayout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Margin = Padding.Empty };
+            runLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            runText = new Label { AutoSize = true, Font = Theme.Bold, Margin = new Padding(2, 2, 0, 8) };
+            runBar = new SlimProgress { Dock = DockStyle.Top, Margin = new Padding(2, 0, 2, 10) };
+            var runButtons = new FlowLayoutPanel { AutoSize = true, Margin = Padding.Empty, WrapContents = true };
+            stopBtn = Theme.SecondaryButton("Stop");
+            openFolderBtn = Theme.PrimaryButton("Open folder");
+            openToolBtn = Theme.SecondaryButton("Open in tool");
+            doneBtn = Theme.SecondaryButton("Do something else");
+            foreach (var b in new[] { stopBtn, openFolderBtn, openToolBtn, doneBtn }) { b.Margin = new Padding(0, 0, 8, 0); runButtons.Controls.Add(b); }
+            stopBtn.Click += delegate { if (runPanel != null) { runPanel.StopRun(); runText.Text = "Stopping after the files in progress…"; stopBtn.Enabled = false; } };
+            openFolderBtn.Click += delegate { OpenFolder(); };
+            openToolBtn.Click += delegate { if (HomeTool.Open != null && runTool != null) HomeTool.Open(runTool, runFiles ?? new List<string>()); };
+            doneBtn.Click += delegate { runCard.Visible = false; };
+            runLayout.Controls.Add(runText, 0, 0); runLayout.Controls.Add(runBar, 0, 1); runLayout.Controls.Add(runButtons, 0, 2);
+            runCard.Controls.Add(runLayout);
+            runCard.Resize += delegate { FitRun(); };
 
             summary = new Label { AutoSize = true, Font = Theme.Bold, Margin = new Padding(2, 0, 0, 8), Text = "" };
             cards = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Margin = Padding.Empty, WrapContents = true };
             unsupported = Theme.MutedLabel(""); unsupported.Margin = new Padding(2, 6, 0, 0); unsupported.MaximumSize = new Size(600, 0);
 
             body.Controls.Add(zone, 0, 0);
-            body.Controls.Add(summary, 0, 1);
-            body.Controls.Add(cards, 0, 2);
-            body.Controls.Add(unsupported, 0, 3);
+            body.Controls.Add(runCard, 0, 1);
+            body.Controls.Add(summary, 0, 2);
+            body.Controls.Add(cards, 0, 3);
+            body.Controls.Add(unsupported, 0, 4);
             Controls.Add(body);
             body.Resize += delegate { FitCards(); };
             BackColorChanged += delegate { Theme.NativeTheme(this, Theme.IsDark ? "DarkMode_Explorer" : null); };
 
             // The whole page is a drop target, not just the zone.
-            bool sta = Thread.CurrentThread.GetApartmentState() == ApartmentState.STA;
-            AllowDrop = sta;
-            DragEnter += (s, e) => { e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None; zone.Hot = true; };
+            AllowDrop = Thread.CurrentThread.GetApartmentState() == ApartmentState.STA;
+            DragEnter += (s, e) => { e.Effect = !Busy && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None; zone.Hot = !Busy; };
             DragLeave += delegate { zone.Hot = false; };
             DragDrop += (s, e) => { zone.Hot = false; var p = e.Data.GetData(DataFormats.FileDrop) as string[]; if (p != null) Analyse(p); };
             ShowCards(null);
@@ -201,6 +238,7 @@ namespace Konbini
 
         private void BrowseFiles()
         {
+            if (Busy) return;
             using (var d = new OpenFileDialog { Multiselect = true, Title = "Choose files" })
                 if (d.ShowDialog(FindForm()) == DialogResult.OK) Analyse(d.FileNames);
         }
@@ -208,8 +246,10 @@ namespace Konbini
         /// <summary>Classifies the paths off the UI thread, then shows the suggestions.</summary>
         public void Analyse(string[] paths)
         {
+            if (Busy) return;   // a quick action is running; its files stay as they are
             if (cts != null) cts.Cancel();
             var my = cts = new CancellationTokenSource();
+            runCard.Visible = false;
             summary.Text = "Looking at your files…";
             cards.Controls.Clear(); unsupported.Text = "";
             var tools = HomeTool.Tools.ToList();
@@ -232,7 +272,7 @@ namespace Konbini
             {
                 summary.Text = "Or start with a tool:";
                 foreach (var t in HomeTool.Tools)
-                    cards.Controls.Add(MakeCard(t, t.Description, null, false));
+                    cards.Controls.Add(MakeCard(t, t.Description, null, null, false));
                 unsupported.Text = "";
             }
             else
@@ -241,7 +281,7 @@ namespace Konbini
                 bool first = true;
                 foreach (var s in a.Suggestions)
                 {
-                    cards.Controls.Add(MakeCard(s.Tool, s.Reason, s.Files, first));
+                    cards.Controls.Add(MakeCard(s.Tool, s.Reason, s.Files, s.Quick, first));
                     first = false;
                 }
                 unsupported.Text = a.Unsupported == 0 ? ""
@@ -264,16 +304,92 @@ namespace Konbini
             cards.ResumeLayout(true);
         }
 
-        private Control MakeCard(ITool tool, string reason, List<string> files, bool best)
+        private static string Noun(ITool tool) { return tool is VideoCompressorTool ? "video" : tool is FileConverterTool ? "file" : "image"; }
+
+        private Control MakeCard(ITool tool, string reason, List<string> files, string quick, bool best)
         {
-            string count = files == null ? "" : (tool is VideoCompressorTool ? DropAnalysis.Plural(files.Count, "video")
-                : tool is FileConverterTool ? DropAnalysis.Plural(files.Count, "file") : DropAnalysis.Plural(files.Count, "image"));
-            var card = new SuggestionCard { Tool = tool, Heading = tool.Name, Reason = reason, Count = count, Best = best, Files = files };
-            card.Click += delegate
+            var card = new SuggestionCard { Tool = tool, Heading = tool.Name, Reason = reason, Best = best, Files = files };
+            if (files == null)
             {
-                if (HomeTool.Open != null) HomeTool.Open(tool, files ?? new List<string>());
-            };
+                // Shortcut card (nothing dropped yet): the whole card opens the tool.
+                card.Click += delegate { if (HomeTool.Open != null) HomeTool.Open(tool, new List<string>()); };
+                return card;
+            }
+            string count = DropAnalysis.Plural(files.Count, Noun(tool));
+            if (quick != null)
+            {
+                // Simple tool: run it right here with its current settings; the link opens the tool for more choices.
+                card.Count = count;
+                card.SetActions(quick, () => RunQuick(tool, files, quick), "More options", () => HomeTool.Open(tool, files));
+            }
+            else
+            {
+                // Tool with real choices (size, format, template): take the files there.
+                card.Count = count;
+                card.SetActions("Open tool  →", () => HomeTool.Open(tool, files), null, null);
+            }
             return card;
+        }
+
+        /// <summary>Runs a simple tool on the files right here: progress, Stop, then Open folder / Open in tool.</summary>
+        public void RunQuick(ITool tool, List<string> files, string verb)
+        {
+            if (Busy || HomeTool.PanelFor == null) return;
+            var panel = HomeTool.PanelFor(tool);
+            if (panel == null) { HomeTool.Open(tool, files); return; }
+            panel.ClearFiles();
+            panel.AddFiles(files);
+            runPanel = panel; runTool = tool; runFiles = files; runOutputs = null;
+            runText.Text = verb + ": " + DropAnalysis.Plural(files.Count, Noun(tool)) + "…";
+            runBar.Maximum = Math.Max(1, files.Count); runBar.Value = 0; runBar.Visible = true;
+            stopBtn.Visible = true; stopBtn.Enabled = true;
+            openFolderBtn.Visible = openToolBtn.Visible = doneBtn.Visible = false;
+            runCard.Visible = true;
+            SetCardsEnabled(false);
+            FitRun();
+
+            Action<int, int> onProgress = (done, total) => { runBar.Maximum = Math.Max(1, total); runBar.Value = Math.Min(done, runBar.Maximum); runText.Text = verb + ": " + done + " of " + total + "…"; };
+            Action<int, int, bool> onDone = null;
+            onDone = (ok, fail, stopped) =>
+            {
+                panel.RunProgress -= onProgress; panel.RunCompleted -= onDone;
+                runOutputs = panel.LastOutputs ?? new List<string>();
+                panel.ClearFiles();   // the tool's batch is only borrowed; free it
+                runText.Text = (stopped ? "Stopped. " : "Done! ") + DropAnalysis.Plural(ok, "file") + " saved next to the originals"
+                    + (fail > 0 ? " · " + fail + " failed (open in tool to see why)" : "") + ".";
+                runBar.Visible = false; stopBtn.Visible = false;
+                openFolderBtn.Visible = runOutputs.Count > 0; openToolBtn.Visible = true; doneBtn.Visible = true;
+                SetCardsEnabled(true);
+                FitRun();
+            };
+            panel.RunProgress += onProgress;
+            panel.RunCompleted += onDone;
+            Theme.Apply(runCard);
+
+            // StartRun runs the tool's own checks first (e.g. asking to download a model); it returns false if they stop it.
+            if (!panel.StartRun())
+            {
+                panel.RunProgress -= onProgress; panel.RunCompleted -= onDone;
+                panel.ClearFiles();
+                runPanel = null; runCard.Visible = false;
+                SetCardsEnabled(true);
+            }
+        }
+
+        // Card (a Panel) doesn't shrink-wrap docked content reliably, so size it to the run strip's contents.
+        private void FitRun()
+        {
+            var inner = runCard.Controls[0];
+            int h = inner.GetPreferredSize(new Size(Math.Max(1, runCard.ClientSize.Width - runCard.Padding.Horizontal), 0)).Height + runCard.Padding.Vertical;
+            if (runCard.Height != h) runCard.Height = h;
+        }
+
+        private void SetCardsEnabled(bool on) { foreach (Control c in cards.Controls) c.Enabled = on; zone.Enabled = on; }
+
+        private void OpenFolder()
+        {
+            if (runOutputs == null || runOutputs.Count == 0) return;
+            try { System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + runOutputs[0] + "\""); } catch (Exception) { }
         }
     }
 
@@ -321,7 +437,8 @@ namespace Konbini
         }
     }
 
-    /// <summary>A clickable suggestion: tool name, why, and how many files it will take.</summary>
+    /// <summary>A suggestion card: tool name and what it does, plus a main button (run now, or open the tool with the
+    /// files) and an optional link to the full tool. Without actions (shortcut cards) the whole card is clickable.</summary>
     public class SuggestionCard : Control
     {
         public ITool Tool;
@@ -329,6 +446,8 @@ namespace Konbini
         public bool Best;
         public List<string> Files;
         private bool over;
+        private Button main;
+        private LinkLabel link;
 
         public SuggestionCard()
         {
@@ -336,18 +455,50 @@ namespace Konbini
             Size = new Size(260, 100); Margin = new Padding(0, 0, 12, 12); Cursor = Cursors.Hand; TabStop = true;
             MouseEnter += delegate { over = true; Invalidate(); };
             MouseLeave += delegate { over = false; Invalidate(); };
-            KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) OnClick(EventArgs.Empty); };
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) { if (main != null) main.PerformClick(); else OnClick(EventArgs.Empty); } };
             GotFocus += delegate { Invalidate(); }; LostFocus += delegate { Invalidate(); };
+            Resize += delegate { PlaceActions(); };
+        }
+
+        /// <summary>The main button (for tests).</summary>
+        public Button MainButton { get { return main; } }
+        /// <summary>The "More options" link, if any (for tests).</summary>
+        public LinkLabel MoreLink { get { return link; } }
+
+        public void SetActions(string mainText, Action mainAction, string linkText, Action linkAction)
+        {
+            Height = 124; Cursor = Cursors.Default;
+            main = Best ? Theme.PrimaryButton(mainText) : Theme.SecondaryButton(mainText);
+            main.Padding = new Padding(10, 3, 10, 3);
+            main.Click += delegate { mainAction(); };
+            Controls.Add(main);
+            if (linkText != null)
+            {
+                link = new LinkLabel { Text = linkText + " →", AutoSize = true, LinkBehavior = LinkBehavior.HoverUnderline, Cursor = Cursors.Hand };
+                link.LinkClicked += delegate { linkAction(); };
+                Controls.Add(link);
+            }
+            PlaceActions();
+        }
+
+        private void PlaceActions()
+        {
+            if (main == null) return;
+            main.Location = new Point(14, Height - main.Height - 12);
+            main.MaximumSize = new Size(Math.Max(80, Width - 28 - (link != null ? link.PreferredWidth + 12 : 0)), 0);
+            if (link != null) link.Location = new Point(Width - link.PreferredWidth - 14, main.Top + (main.Height - link.Height) / 2);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Parent != null ? Parent.BackColor : Theme.Bg);
+            Color fill = over && main == null ? Theme.Hover : Theme.Card;
+            if (link != null) { link.BackColor = fill; link.LinkColor = Theme.Accent; link.ActiveLinkColor = Theme.AccentHover; }
             var r = new RectangleF(1, 1, Width - 3, Height - 3);
             using (var path = Theme.RoundRect(r, 10))
             {
-                using (var b = new SolidBrush(over ? Theme.Hover : Theme.Card)) g.FillPath(b, path);
+                using (var b = new SolidBrush(fill)) g.FillPath(b, path);
                 using (var p = new Pen(Best || Focused ? Theme.Accent : Theme.Border, Best ? 2f : 1f)) g.DrawPath(p, path);
             }
             int x = 14;
@@ -360,10 +511,10 @@ namespace Konbini
                 TextRenderer.DrawText(g, tag, Theme.Body, new Rectangle(Width - sz.Width - 20, 10, sz.Width + 2, 20), Color.White, TextFormatFlags.VerticalCenter);
             }
             TextRenderer.DrawText(g, Heading, Theme.Bold, new Rectangle(x, 10, Width - x - (Best ? 100 : 14), 22), Theme.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter);
-            int reasonH = string.IsNullOrEmpty(Count) ? Height - 34 - 8 : 36;   // shortcut cards have no count line: use 3 lines
+            int reasonH = main == null ? Height - 34 - 8 : (string.IsNullOrEmpty(Count) ? 36 : 18);
             TextRenderer.DrawText(g, Reason ?? "", Theme.Body, new Rectangle(x, 34, Width - x - 14, reasonH), Theme.Muted, TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
-            if (!string.IsNullOrEmpty(Count))
-                TextRenderer.DrawText(g, Count + "  →", Theme.Bold, new Rectangle(x, Height - 28, Width - x - 14, 20), Theme.Accent, TextFormatFlags.VerticalCenter);
+            if (main != null && !string.IsNullOrEmpty(Count))
+                TextRenderer.DrawText(g, Count, Theme.Body, new Rectangle(x, 54, Width - x - 14, 18), Theme.Text, TextFormatFlags.EndEllipsis);
         }
     }
 }
