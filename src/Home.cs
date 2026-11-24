@@ -160,7 +160,12 @@ namespace Konbini
     // A scrolling panel holding a full-width, auto-height layout: it can scroll down on small windows but never sideways.
     public class HomeView : Panel
     {
-        private const int CardMin = 230, Gap = 12;
+        private const int CardMin = 230, Gap = 12, ZoneTall = 200, ZoneShort = 64, ListHeight = 240;
+        private readonly BatchImagePanel staging;
+        private readonly System.Windows.Forms.Timer reanalyse;
+
+        /// <summary>The list of dropped files shown on Home (for tests).</summary>
+        public BatchImagePanel Staging { get { return staging; } }
         private readonly TableLayoutPanel body;
         private readonly DropZone zone;
         private readonly Label summary;
@@ -187,10 +192,20 @@ namespace Konbini
         public HomeView()
         {
             Dock = DockStyle.Fill; AutoScroll = true;
-            body = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
+            body = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty };
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            body.RowStyles.Add(new RowStyle(SizeType.Absolute, 200));
+            body.RowStyles.Add(new RowStyle(SizeType.Absolute, ZoneTall));   // drop zone (shrinks once files are added)
+            body.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));          // the dropped files (hidden while empty)
             for (int i = 0; i < 4; i++) body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            // What was dropped, with the same toolbar as every tool: add, remove selected, clear, list/thumbnails.
+            staging = new BatchImagePanel("", new Panel()) { Accept = f => true, Suffix = "", WarnOnEmptySuffix = false, Margin = new Padding(0, 0, 0, 14), Visible = false };
+            staging.Noun = "file";
+            staging.ShowListOnly();
+            staging.ItemsChanged += delegate { StagingChanged(); };
+            reanalyse = new System.Windows.Forms.Timer { Interval = 200 };
+            reanalyse.Tick += delegate { reanalyse.Stop(); AnalyseStaged(); };
+            Disposed += delegate { reanalyse.Dispose(); };
 
             zone = new DropZone { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 14) };
             zone.Browse += delegate { BrowseFiles(); };
@@ -220,10 +235,11 @@ namespace Konbini
             unsupported = Theme.MutedLabel(""); unsupported.Margin = new Padding(2, 6, 0, 0); unsupported.MaximumSize = new Size(600, 0);
 
             body.Controls.Add(zone, 0, 0);
-            body.Controls.Add(runCard, 0, 1);
-            body.Controls.Add(summary, 0, 2);
-            body.Controls.Add(cards, 0, 3);
-            body.Controls.Add(unsupported, 0, 4);
+            body.Controls.Add(staging, 0, 1);
+            body.Controls.Add(runCard, 0, 2);
+            body.Controls.Add(summary, 0, 3);
+            body.Controls.Add(cards, 0, 4);
+            body.Controls.Add(unsupported, 0, 5);
             Controls.Add(body);
             body.Resize += delegate { FitCards(); };
             BackColorChanged += delegate { Theme.NativeTheme(this, Theme.IsDark ? "DarkMode_Explorer" : null); };
@@ -243,15 +259,35 @@ namespace Konbini
                 if (d.ShowDialog(FindForm()) == DialogResult.OK) Analyse(d.FileNames);
         }
 
-        /// <summary>Classifies the paths off the UI thread, then shows the suggestions.</summary>
+        /// <summary>Adds dropped/browsed files or folders to the list; the suggestions follow whatever the list holds.</summary>
         public void Analyse(string[] paths)
         {
             if (Busy) return;   // a quick action is running; its files stay as they are
-            if (cts != null) cts.Cancel();
-            var my = cts = new CancellationTokenSource();
             runCard.Visible = false;
+            staging.AddFiles(paths);
+            AnalyseStaged();
+        }
+
+        // The list changed (drop, add, remove selected, clear): resize the page and refresh suggestions shortly after.
+        private void StagingChanged()
+        {
+            bool any = staging.Files.Length > 0;
+            body.RowStyles[0].Height = any ? ZoneShort : ZoneTall;
+            body.RowStyles[1].Height = any ? ListHeight : 0;
+            staging.Visible = any;
+            zone.Compact = any;
+            reanalyse.Stop(); reanalyse.Start();
+        }
+
+        /// <summary>Classifies the listed files off the UI thread, then shows the suggestions.</summary>
+        private void AnalyseStaged()
+        {
+            reanalyse.Stop();
+            if (cts != null) cts.Cancel();
+            var paths = staging.Files;
+            if (paths.Length == 0) { ShowCards(null); return; }
+            var my = cts = new CancellationTokenSource();
             summary.Text = "Looking at your files…";
-            cards.Controls.Clear(); unsupported.Text = "";
             var tools = HomeTool.Tools.ToList();
             Task.Factory.StartNew(() => HomeSuggest.Analyse(paths, tools, () => my.IsCancellationRequested), my.Token)
                 .ContinueWith(t =>
@@ -400,6 +436,9 @@ namespace Konbini
         public event EventHandler Browse;
         private bool hot;
         public bool Hot { get { return hot; } set { if (hot != value) { hot = value; Invalidate(); } } }
+        private bool compact;
+        /// <summary>Short one-line version once files are listed below it.</summary>
+        public bool Compact { get { return compact; } set { if (compact != value) { compact = value; Place(); Invalidate(); } } }
         private readonly Button browse;
 
         public DropZone()
@@ -415,7 +454,11 @@ namespace Konbini
             DragDrop += (s, e) => { Hot = false; var p = e.Data.GetData(DataFormats.FileDrop) as string[]; if (p != null && Dropped != null) Dropped(p); };
         }
 
-        private void Place() { browse.Location = new Point((Width - browse.Width) / 2, Height / 2 + 22); }
+        private void Place()
+        {
+            browse.Visible = !compact;   // once files are listed, the list's own toolbar has Add files / Add folder
+            browse.Location = new Point((Width - browse.Width) / 2, Height / 2 + 22);
+        }
 
         protected override void OnLayout(LayoutEventArgs e) { base.OnLayout(e); Place(); }
 
@@ -428,6 +471,12 @@ namespace Konbini
             {
                 using (var b = new SolidBrush(hot ? Color.FromArgb(40, Theme.Accent) : Theme.Card)) g.FillPath(b, path);
                 using (var p = new Pen(hot ? Theme.Accent : Theme.Border, hot ? 2.5f : 1.5f) { DashStyle = DashStyle.Dash }) g.DrawPath(p, path);
+            }
+            if (compact)
+            {
+                TextRenderer.DrawText(g, hot ? "Drop to add them" : "Drop more files or folders here", Theme.Bold,
+                    new Rectangle(0, 0, Width, Height), Theme.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                return;
             }
             using (var big = new Font("Segoe UI Semibold", 15f))
                 TextRenderer.DrawText(g, hot ? "Drop to see what you can do" : "Drop files or folders here", big,

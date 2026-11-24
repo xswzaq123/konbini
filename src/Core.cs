@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -473,6 +473,7 @@ namespace Konbini
             outBox.Controls.Add(outFlow);
             bottom.Controls.Add(outBox, 1, 0);
             root.Controls.Add(bottom, 0, 2);
+            bottomPart = bottom;
 
             // Run row
             var runRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, Margin = new Padding(0, 8, 0, 0) };
@@ -484,6 +485,7 @@ namespace Konbini
             runBtn = Theme.PrimaryButton(runText);
             runRow.Controls.Add(status, 0, 0); runRow.Controls.Add(progress, 1, 0); runRow.Controls.Add(runBtn, 2, 0);
             root.Controls.Add(runRow, 0, 3);
+            runPart = runRow;
 
             // Events
             sameFolder.CheckedChanged += delegate { outDir.Visible = browse.Visible = !sameFolder.Checked; };
@@ -515,6 +517,12 @@ namespace Konbini
             List.DragDrop += (s, e) => AddPaths((string[])e.Data.GetData(DataFormats.FileDrop));
             runBtn.Click += delegate { Run(); };
         }
+
+        private Control bottomPart, runPart;
+
+        /// <summary>Just the file list and its toolbar (add, remove, clear, list/thumbnails): no options, output or Run.
+        /// The Home page uses this to show what was dropped.</summary>
+        public void ShowListOnly() { bottomPart.Visible = false; runPart.Visible = false; }
 
         /// <summary>Adds files or folders to the batch (same rules as dropping them on the list). Used by the Home page.</summary>
         public void AddFiles(IEnumerable<string> paths) { AddPaths(paths); }

@@ -33,6 +33,7 @@ $names = @($a.Suggestions | ForEach-Object { $_.Tool.Name })
 Check 'suggestions ordered' ($names[0] -eq 'File Converter' -and $names -contains 'Background Remover' -and $names.IndexOf('Image Compressor') -lt $names.IndexOf('Background Remover')) ($names -join ', ')
 $bg = $a.Suggestions | Where-Object { $_.Tool.Name -eq 'Background Remover' }
 Check 'bg remover takes the 3 images' ($bg.Files.Count -eq 3)
+Check 'dropped files are listed on Home' ($homeView.Staging.Visible -and $homeView.Staging.Files.Length -eq 6) "listed=$($homeView.Staging.Files.Length)"
 $cards = @(); foreach ($c in (Find-Ctl $homeView { param($x) $x -is [Windows.Forms.FlowLayoutPanel] -and $x.Controls.Count -gt 0 -and $x.Controls[0].GetType().Name -eq 'SuggestionCard' }).Controls) { $cards += $c }
 Check 'one card per suggestion' ($cards.Count -eq $a.Suggestions.Count) "$($cards.Count) cards"
 
@@ -70,6 +71,14 @@ $panel.GetType().GetProperty('Busy').SetValue($panel, $false)
 $nav.SelectedIndex = 0; Pump 500
 Check 'Home after the run, batch cleared' ("$($nav.SelectedItem.Name)" -eq 'Home' -and $panel.Files.Length -eq 0)
 $t.Stop()
+
+# Remove selected / Clear on Home update the suggestions
+$homeView.Analyse([string[]]@("$work\a.jpg", "$work\doc.pdf")); WaitFor { $homeView.Last -ne $null -and $homeView.Last.Images -eq 1 } | Out-Null
+$st = $homeView.Staging; foreach ($it in $st.List.Items) { $it.Selected = ($it.Text -eq 'doc.pdf') }
+(Find-Ctl $st { param($x) $x -is [Windows.Forms.Button] -and $x.Text -eq 'Remove selected' }).PerformClick()
+Check 'remove selected updates suggestions' (WaitFor { $homeView.Last.Others -eq 0 -and $homeView.Last.Images -eq 1 }) $homeView.Last.Summary
+(Find-Ctl $st { param($x) $x -is [Windows.Forms.Button] -and $x.Text -eq 'Clear' }).PerformClick()
+Check 'clear empties the list and resets Home' (WaitFor { $homeView.Last -eq $null -and -not $st.Visible })
 
 # An unknown file type is still offered to the File Converter
 $homeView.Analyse([string[]]@("$work\mystery.xyz")); WaitFor { $homeView.Last -ne $null -and $homeView.Last.Others -eq 1 } | Out-Null
