@@ -1,0 +1,30 @@
+﻿Konbini — third-party components
+================================
+
+Built into Konbini.exe
+----------------------
+* Real-ESRGAN (realesr-general-x4v3) — image upscaling model
+  Copyright (c) 2021 Xintao Wang. BSD 3-Clause License.
+  https://github.com/xinntao/Real-ESRGAN
+
+* U²-Net-P (u2netp) — lite background removal model
+  Copyright (c) 2020 Xuebin Qin. Apache License 2.0.
+  https://github.com/xuebinqin/U-2-Net
+
+Downloaded only when you choose to use them (not included in Konbini)
+-------------------------------------------------------------------
+* IS-Net / DIS (isnet-general-use; full precision, and a half-precision copy hosted with Konbini's releases)
+  Copyright (c) Xuebin Qin et al. Apache License 2.0. https://github.com/xuebinqin/DIS
+* BiRefNet and BiRefNet-lite — MIT License, Copyright (c) 2024 ZhengPeng7
+  https://github.com/ZhengPeng7/BiRefNet  (ONNX files from github.com/danielgatis/rembg)
+* FFmpeg 9.1 "essentials" build by gyan.dev — GNU GPL v3 (includes libx264, libx265)
+  https://ffmpeg.org  ·  https://www.gyan.dev/ffmpeg/builds/  ·  source: https://github.com/FFmpeg/FFmpeg
+  Downloaded from https://github.com/GyanD/codexffmpeg and checked against a fixed SHA-256 before use.
+
+Downloaded components are stored in %LOCALAPPDATA%\Konbini\deps (or "Konbini Data\deps" in the portable
+version) and can be removed from Settings → Components.
+
+Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+BSD 3-Clause:       https://opensource.org/license/bsd-3-clause
+MIT License:        https://opensource.org/license/mit
+GNU GPL v3:         https://www.gnu.org/licenses/gpl-3.0.html

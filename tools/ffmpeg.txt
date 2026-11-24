@@ -1,0 +1,9 @@
+Embedded video engine for the Video Compressor.
+Source: gyan.dev "essentials" static build, mirrored on GitHub (GyanD/codexffmpeg), linked from ffmpeg.org/download.html
+URL:     https://github.com/GyanD/codexffmpeg/releases/download/9.1/ffmpeg-9.1-essentials_build.zip
+File:    bin/ffmpeg.exe -> models/ffmpeg.exe
+Version: ffmpeg 9.1-essentials_build-www.gyan.dev (includes libx264, libx265, aac)
+SHA-256: ed8f66cb877087a96f5bbb40a2944f0e764f2ad8870d5cb647360d912e62bc07
+Licence: GPL v3 (because of libx264/libx265). See models/ffmpeg-LICENSE.txt. If Konbini is distributed,
+         ffmpeg's source must be offered alongside it.
+Not embedded: downloaded at runtime by src/Deps/DepManager.cs (Registry.Ffmpeg pins the zip and exe hashes). zip SHA-256: b9bbbb3acece000cbeec994f856649354e52c773807841e78908374b24d658fd

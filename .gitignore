@@ -1,0 +1,33 @@
+# Build output (installer and zip go to GitHub Releases, not the repo)
+dist/
+
+# Test-only copies of downloadable dependencies; the app downloads its own.
+# ffmpeg.exe (105 MB) and isnet-general-use.onnx (170 MB) exceed GitHub's 100 MB limit.
+models/ffmpeg.exe
+models/ffmpeg-LICENSE.txt
+models/isnet-general-use.onnx
+models/isnet-general-use-fp16.onnx
+
+# Files you upload to your own GitHub release (the Standard model download)
+hosting/
+
+# Portable-mode data and test leftovers
+Konbini Data/
+*.partial
+*.tmp
+
+# Python virtual environments used by tools/*.py
+.venv/
+venv/
+__pycache__/
+
+# Editor / OS clutter
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini
+
+# Claude Code local settings and logs
+.claude/
+*.log

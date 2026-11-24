@@ -1,0 +1,15 @@
+# Windows-only project: keep Windows line endings in the working tree.
+* text=auto
+*.cs   text eol=crlf
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.md   text eol=crlf
+*.txt  text eol=crlf
+
+# Binary files: never touch line endings or diff them as text.
+*.onnx binary
+*.ico  binary
+*.png  binary
+*.exe  binary
+*.zip  binary
