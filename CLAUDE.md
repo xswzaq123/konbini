@@ -87,6 +87,11 @@ The version lives in `src\AppInfo.cs` (`AppInfo.Version`) and in `installer\Setu
 ## Architecture
 
 - **Shell:** `src/Program.cs`. `MainForm` has a sidebar (search box, owner-drawn nav `ListBox` grouped by `ITool.Category`, Settings button) and a content panel. Each page is built once with `Page(title, desc, body)`, cached in `views`, and recoloured in place when the theme changes. The page's `TableLayoutPanel` columns must use `Percent`, never the default AutoSize, so content can't push the page wider than the window.
+- **Home page** (`src/Home.cs`): the startup page, and the first sidebar item. `HomeTool` is an `ITool`, so the busy guard, clear-on-leave and flicker-free switching all apply to it.
+  - `HomeSuggest.Analyse` expands folders (up to 10,000 files) and classifies each file off the UI thread. It uses the same rules the tools' batches use: `ImageUtil.IsImage` for the image tools, `FileDetector` category Video for Video Compressor, and `Converters.TargetsFor` for File Converter.
+  - Clicking a suggestion calls `MainForm.OpenToolWith`, which opens the tool and passes the files to `BatchImagePanel.AddFiles`.
+  - **When adding a tool,** give it a reason and an order in `HomeSuggest.Info`, and a classification rule in `Analyse`.
+  - Tested by `tests\home.ps1`.
 - **Adding a tool:** implement `ITool` (`Name`, `Category`, `Description`, `CreateView()`), then register it in `ToolRegistry.All()` in `src/Core.cs`.
 - **`BatchImagePanel`** (`src/Core.cs`) is the shared batch UI that every tool reuses. It provides:
   - a toolbar for add, add folder, remove and clear

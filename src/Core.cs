@@ -506,6 +506,9 @@ namespace Konbini
             runBtn.Click += delegate { Run(); };
         }
 
+        /// <summary>Adds files or folders to the batch (same rules as dropping them on the list). Used by the Home page.</summary>
+        public void AddFiles(IEnumerable<string> paths) { AddPaths(paths); }
+
         /// <summary>Removes every file from the batch and frees its thumbnails (Clear button; also when leaving the tool).</summary>
         public void ClearFiles()
         {

@@ -1,0 +1,369 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using Konbini.Conversion;
+
+namespace Konbini
+{
+    /// <summary>One suggested action: a tool and the dropped files it can take.</summary>
+    public sealed class Suggestion
+    {
+        public ITool Tool;
+        public string Reason;
+        public List<string> Files = new List<string>();
+        public int Priority;   // lower = suggested first when file counts tie
+    }
+
+    /// <summary>What the Home page found in a drop: counts per kind, suggestions, and files nothing can take.</summary>
+    public sealed class DropAnalysis
+    {
+        public int Images, Videos, Others, Unsupported;
+        public bool Truncated;
+        public List<Suggestion> Suggestions = new List<Suggestion>();
+        public List<string> UnsupportedFiles = new List<string>();
+
+        public string Summary
+        {
+            get
+            {
+                var parts = new List<string>();
+                if (Images > 0) parts.Add(Plural(Images, "image"));
+                if (Videos > 0) parts.Add(Plural(Videos, "video"));
+                if (Others > 0) parts.Add(Plural(Others, "other file"));
+                if (Unsupported > 0) parts.Add(Unsupported + " not supported");
+                string s = parts.Count == 0 ? "No files found" : string.Join(" · ", parts);
+                return Truncated ? s + "  (first " + HomeSuggest.MaxFiles.ToString("N0") + " files only)" : s;
+            }
+        }
+
+        public static string Plural(int n, string word) { return n.ToString("N0") + " " + word + (n == 1 ? "" : "s"); }
+    }
+
+    /// <summary>Decides which tools fit the dropped files, using the same rules each tool's batch uses to accept files.</summary>
+    public static class HomeSuggest
+    {
+        public const int MaxFiles = 10000;
+
+        // Per tool: what it does for these files, and its order when several tools fit equally well.
+        private static readonly Dictionary<Type, string[]> Info = new Dictionary<Type, string[]>
+        {
+            { typeof(ImageCompressorTool),   new[] { "0", "Make them smaller to share or upload" } },
+            { typeof(ImageResizerTool),      new[] { "1", "Change their width and height" } },
+            { typeof(ImageUpscalerTool),     new[] { "2", "Enlarge them with AI" } },
+            { typeof(BackgroundRemoverTool), new[] { "3", "Cut out the subject" } },
+            { typeof(VideoCompressorTool),   new[] { "0", "Shrink them for sharing or storage" } },
+            { typeof(FileConverterTool),     new[] { "9", "Convert them to another format" } },
+        };
+
+        /// <summary>Expands folders and classifies every file. Runs on a worker thread; checks <paramref name="cancelled"/>.</summary>
+        public static DropAnalysis Analyse(IEnumerable<string> paths, IList<ITool> tools, Func<bool> cancelled)
+        {
+            var a = new DropAnalysis();
+            var files = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in paths)
+            {
+                if (files.Count >= MaxFiles) { a.Truncated = true; break; }
+                try
+                {
+                    if (Directory.Exists(p))
+                    {
+                        foreach (var f in Directory.EnumerateFiles(p, "*.*", SearchOption.AllDirectories))
+                        {
+                            if (files.Count >= MaxFiles) { a.Truncated = true; break; }
+                            if (seen.Add(f)) files.Add(f);
+                        }
+                    }
+                    else if (File.Exists(p) && seen.Add(p)) files.Add(p);
+                }
+                catch (Exception) { } // unreadable folder: skip it, like the batch list does
+                if (cancelled()) return a;
+            }
+
+            var byTool = new Dictionary<ITool, Suggestion>();
+            Func<Type, Suggestion> get = t =>
+            {
+                var tool = tools.FirstOrDefault(x => x.GetType() == t);
+                if (tool == null) return null;
+                Suggestion s;
+                if (!byTool.TryGetValue(tool, out s))
+                {
+                    string[] info;
+                    Info.TryGetValue(t, out info);
+                    byTool[tool] = s = new Suggestion { Tool = tool, Reason = info != null ? info[1] : tool.Description, Priority = info != null ? int.Parse(info[0]) : 5 };
+                }
+                return s;
+            };
+
+            foreach (var f in files)
+            {
+                if (cancelled()) return a;
+                FileKind kind = null;
+                try { kind = FileDetector.Detect(f); } catch (Exception) { }
+                bool convertible = kind != null && Converters.TargetsFor(kind).Count > 0;
+                bool any = false;
+
+                // Image tools accept by extension (BatchImagePanel's default Accept).
+                if (ImageUtil.IsImage(f))
+                {
+                    a.Images++; any = true;
+                    foreach (var t in new[] { typeof(ImageCompressorTool), typeof(ImageResizerTool), typeof(ImageUpscalerTool), typeof(BackgroundRemoverTool) })
+                    { var s = get(t); if (s != null) s.Files.Add(f); }
+                }
+                // Video Compressor accepts what FileDetector calls video (its own Accept rule).
+                else if (kind != null && kind.Category == Category.Video)
+                {
+                    a.Videos++; any = true;
+                    var s = get(typeof(VideoCompressorTool)); if (s != null) s.Files.Add(f);
+                }
+                if (convertible)
+                {
+                    var s = get(typeof(FileConverterTool)); if (s != null) s.Files.Add(f);
+                    if (!any) { a.Others++; any = true; }
+                }
+                if (!any) { a.Unsupported++; if (a.UnsupportedFiles.Count < 50) a.UnsupportedFiles.Add(f); }
+            }
+
+            a.Suggestions = byTool.Values.Where(s => s.Files.Count > 0)
+                .OrderByDescending(s => s.Files.Count).ThenBy(s => s.Priority).ToList();
+            return a;
+        }
+    }
+
+    /// <summary>The start page: drop anything, get suggestions, open a tool with the files already in its batch.</summary>
+    public class HomeTool : ITool
+    {
+        /// <summary>Set by MainForm: the tools to suggest, and how to open one with files.</summary>
+        public static IList<ITool> Tools = new List<ITool>();
+        public static Action<ITool, IList<string>> Open;
+
+        public string Name { get { return "Home"; } }
+        public string Category { get { return ""; } }
+        public string Description { get { return "Drop any files or folders and Konbini suggests what to do with them."; } }
+
+        public Control CreateView() { return new HomeView(); }
+    }
+
+    // A scrolling panel holding a full-width, auto-height layout: it can scroll down on small windows but never sideways.
+    public class HomeView : Panel
+    {
+        private const int CardMin = 230, Gap = 12;
+        private readonly TableLayoutPanel body;
+        private readonly DropZone zone;
+        private readonly Label summary;
+        private readonly FlowLayoutPanel cards;
+        private readonly Label unsupported;
+        private CancellationTokenSource cts;
+
+        /// <summary>The last analysis shown (for tests).</summary>
+        public DropAnalysis Last { get; private set; }
+
+        public HomeView()
+        {
+            Dock = DockStyle.Fill; AutoScroll = true;
+            body = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, RowCount = 4, Margin = Padding.Empty };
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            body.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            zone = new DropZone { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 14) };
+            zone.Browse += delegate { BrowseFiles(); };
+            zone.Dropped += paths => Analyse(paths);
+
+            summary = new Label { AutoSize = true, Font = Theme.Bold, Margin = new Padding(2, 0, 0, 8), Text = "" };
+            cards = new FlowLayoutPanel { AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top, Margin = Padding.Empty, WrapContents = true };
+            unsupported = Theme.MutedLabel(""); unsupported.Margin = new Padding(2, 6, 0, 0); unsupported.MaximumSize = new Size(600, 0);
+
+            body.Controls.Add(zone, 0, 0);
+            body.Controls.Add(summary, 0, 1);
+            body.Controls.Add(cards, 0, 2);
+            body.Controls.Add(unsupported, 0, 3);
+            Controls.Add(body);
+            body.Resize += delegate { FitCards(); };
+            BackColorChanged += delegate { Theme.NativeTheme(this, Theme.IsDark ? "DarkMode_Explorer" : null); };
+
+            // The whole page is a drop target, not just the zone.
+            bool sta = Thread.CurrentThread.GetApartmentState() == ApartmentState.STA;
+            AllowDrop = sta;
+            DragEnter += (s, e) => { e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None; zone.Hot = true; };
+            DragLeave += delegate { zone.Hot = false; };
+            DragDrop += (s, e) => { zone.Hot = false; var p = e.Data.GetData(DataFormats.FileDrop) as string[]; if (p != null) Analyse(p); };
+            ShowCards(null);
+        }
+
+        private void BrowseFiles()
+        {
+            using (var d = new OpenFileDialog { Multiselect = true, Title = "Choose files" })
+                if (d.ShowDialog(FindForm()) == DialogResult.OK) Analyse(d.FileNames);
+        }
+
+        /// <summary>Classifies the paths off the UI thread, then shows the suggestions.</summary>
+        public void Analyse(string[] paths)
+        {
+            if (cts != null) cts.Cancel();
+            var my = cts = new CancellationTokenSource();
+            summary.Text = "Looking at your files…";
+            cards.Controls.Clear(); unsupported.Text = "";
+            var tools = HomeTool.Tools.ToList();
+            Task.Factory.StartNew(() => HomeSuggest.Analyse(paths, tools, () => my.IsCancellationRequested), my.Token)
+                .ContinueWith(t =>
+                {
+                    if (my.IsCancellationRequested || IsDisposed || !IsHandleCreated) return;
+                    var a = t.IsFaulted ? new DropAnalysis() : t.Result;
+                    try { BeginInvoke((Action)(() => { if (!my.IsCancellationRequested) ShowCards(a); })); } catch (InvalidOperationException) { }
+                });
+        }
+
+        private void ShowCards(DropAnalysis a)
+        {
+            Last = a;
+            SuspendLayout();
+            foreach (Control c in cards.Controls.Cast<Control>().ToList()) c.Dispose();
+            cards.Controls.Clear();
+            if (a == null)
+            {
+                summary.Text = "Or start with a tool:";
+                foreach (var t in HomeTool.Tools)
+                    cards.Controls.Add(MakeCard(t, t.Description, null, false));
+                unsupported.Text = "";
+            }
+            else
+            {
+                summary.Text = a.Summary + (a.Suggestions.Count > 0 ? " — what would you like to do?" : "");
+                bool first = true;
+                foreach (var s in a.Suggestions)
+                {
+                    cards.Controls.Add(MakeCard(s.Tool, s.Reason, s.Files, first));
+                    first = false;
+                }
+                unsupported.Text = a.Unsupported == 0 ? ""
+                    : "Not supported: " + DropAnalysis.Plural(a.Unsupported, "file") + " (" + string.Join(", ", a.UnsupportedFiles.Take(5).Select(Path.GetFileName)) + (a.Unsupported > 5 ? ", …" : "") + ")";
+            }
+            Theme.Apply(this);
+            FitCards();
+            ResumeLayout(true);
+        }
+
+        // Cards share the row evenly: as many columns as fit at CardMin wide, so they always fill the width without overflowing.
+        private void FitCards()
+        {
+            int avail = body.ClientSize.Width - body.Padding.Horizontal - 6;
+            if (avail <= 0 || cards.Controls.Count == 0) return;
+            int n = Math.Max(1, Math.Min(cards.Controls.Count, avail / (CardMin + Gap)));
+            int w = Math.Max(160, avail / n - Gap);   // each card plus its right margin fits exactly
+            cards.SuspendLayout();
+            foreach (Control c in cards.Controls) { c.Width = w; c.Margin = new Padding(0, 0, Gap, Gap); }
+            cards.ResumeLayout(true);
+        }
+
+        private Control MakeCard(ITool tool, string reason, List<string> files, bool best)
+        {
+            string count = files == null ? "" : (tool is VideoCompressorTool ? DropAnalysis.Plural(files.Count, "video")
+                : tool is FileConverterTool ? DropAnalysis.Plural(files.Count, "file") : DropAnalysis.Plural(files.Count, "image"));
+            var card = new SuggestionCard { Tool = tool, Heading = tool.Name, Reason = reason, Count = count, Best = best, Files = files };
+            card.Click += delegate
+            {
+                if (HomeTool.Open != null) HomeTool.Open(tool, files ?? new List<string>());
+            };
+            return card;
+        }
+    }
+
+    /// <summary>The dashed drop area with a Browse button. Colours come from Theme at paint time.</summary>
+    public class DropZone : Panel
+    {
+        public event Action<string[]> Dropped;
+        public event EventHandler Browse;
+        private bool hot;
+        public bool Hot { get { return hot; } set { if (hot != value) { hot = value; Invalidate(); } } }
+        private readonly Button browse;
+
+        public DropZone()
+        {
+            DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw, true);
+            browse = Theme.PrimaryButton("Browse files…");
+            browse.Click += (s, e) => { if (Browse != null) Browse(this, e); };
+            Controls.Add(browse);
+            Resize += delegate { Place(); };
+            AllowDrop = Thread.CurrentThread.GetApartmentState() == ApartmentState.STA;
+            DragEnter += (s, e) => { e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None; Hot = true; };
+            DragLeave += delegate { Hot = false; };
+            DragDrop += (s, e) => { Hot = false; var p = e.Data.GetData(DataFormats.FileDrop) as string[]; if (p != null && Dropped != null) Dropped(p); };
+        }
+
+        private void Place() { browse.Location = new Point((Width - browse.Width) / 2, Height / 2 + 22); }
+
+        protected override void OnLayout(LayoutEventArgs e) { base.OnLayout(e); Place(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Parent != null ? Parent.BackColor : Theme.Bg);
+            var r = new RectangleF(1, 1, Width - 3, Height - 3);
+            using (var path = Theme.RoundRect(r, 14))
+            {
+                using (var b = new SolidBrush(hot ? Color.FromArgb(40, Theme.Accent) : Theme.Card)) g.FillPath(b, path);
+                using (var p = new Pen(hot ? Theme.Accent : Theme.Border, hot ? 2.5f : 1.5f) { DashStyle = DashStyle.Dash }) g.DrawPath(p, path);
+            }
+            using (var big = new Font("Segoe UI Semibold", 15f))
+                TextRenderer.DrawText(g, hot ? "Drop to see what you can do" : "Drop files or folders here", big,
+                    new Rectangle(0, Height / 2 - 52, Width, 34), Theme.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, "Images, videos, documents, audio, archives… Konbini suggests the right tool.", Theme.Body,
+                new Rectangle(0, Height / 2 - 16, Width, 24), Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+    }
+
+    /// <summary>A clickable suggestion: tool name, why, and how many files it will take.</summary>
+    public class SuggestionCard : Control
+    {
+        public ITool Tool;
+        public string Heading, Reason, Count;
+        public bool Best;
+        public List<string> Files;
+        private bool over;
+
+        public SuggestionCard()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            Size = new Size(260, 100); Margin = new Padding(0, 0, 12, 12); Cursor = Cursors.Hand; TabStop = true;
+            MouseEnter += delegate { over = true; Invalidate(); };
+            MouseLeave += delegate { over = false; Invalidate(); };
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) OnClick(EventArgs.Empty); };
+            GotFocus += delegate { Invalidate(); }; LostFocus += delegate { Invalidate(); };
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Parent != null ? Parent.BackColor : Theme.Bg);
+            var r = new RectangleF(1, 1, Width - 3, Height - 3);
+            using (var path = Theme.RoundRect(r, 10))
+            {
+                using (var b = new SolidBrush(over ? Theme.Hover : Theme.Card)) g.FillPath(b, path);
+                using (var p = new Pen(Best || Focused ? Theme.Accent : Theme.Border, Best ? 2f : 1f)) g.DrawPath(p, path);
+            }
+            int x = 14;
+            if (Best)
+            {
+                var tag = "Suggested";
+                var sz = TextRenderer.MeasureText(tag, Theme.Body);
+                using (var pill = Theme.RoundRect(new RectangleF(Width - sz.Width - 26, 10, sz.Width + 12, 20), 9))
+                using (var b = new SolidBrush(Theme.Accent)) g.FillPath(b, pill);
+                TextRenderer.DrawText(g, tag, Theme.Body, new Rectangle(Width - sz.Width - 20, 10, sz.Width + 2, 20), Color.White, TextFormatFlags.VerticalCenter);
+            }
+            TextRenderer.DrawText(g, Heading, Theme.Bold, new Rectangle(x, 10, Width - x - (Best ? 100 : 14), 22), Theme.Text, TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter);
+            int reasonH = string.IsNullOrEmpty(Count) ? Height - 34 - 8 : 36;   // shortcut cards have no count line: use 3 lines
+            TextRenderer.DrawText(g, Reason ?? "", Theme.Body, new Rectangle(x, 34, Width - x - 14, reasonH), Theme.Muted, TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+            if (!string.IsNullOrEmpty(Count))
+                TextRenderer.DrawText(g, Count + "  →", Theme.Bold, new Rectangle(x, Height - 28, Width - x - 14, 20), Theme.Accent, TextFormatFlags.VerticalCenter);
+        }
+    }
+}

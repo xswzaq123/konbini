@@ -194,7 +194,7 @@ namespace Konbini
             if (c.IsHandleCreated) a(); else c.HandleCreated += delegate { a(); };
         }
 
-        private static void NativeTheme(Control c, string name)
+        internal static void NativeTheme(Control c, string name)
         {
             WhenCreated(c, () => { try { SetWindowTheme(c.Handle, name, null); } catch { } });
         }
