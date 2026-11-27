@@ -38,7 +38,6 @@ namespace Konbini
             MinimumSize = new Size(860, 560);
             ApplyStartSize();
             Font = Theme.Body;
-            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             sidebar = new Panel { Dock = DockStyle.Left, Width = 232, Padding = new Padding(14, 16, 14, 12), Tag = Theme.SidebarTag };
             var brand = new Label { Text = "◆ Konbini", Dock = DockStyle.Top, Height = 46, ForeColor = Color.White,
