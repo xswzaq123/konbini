@@ -342,7 +342,7 @@ namespace Konbini
                 }
             }
             // Free the cleared thumbnails after the new page has painted, so it doesn't delay the switch.
-            if (cleared) BeginInvoke((Action)(() => GC.Collect()));
+            if (cleared) BeginInvoke((Action)(() => Memory.Compact()));
         }
 
         private const int WM_SETREDRAW = 0x000B;

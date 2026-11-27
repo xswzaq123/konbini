@@ -826,6 +826,8 @@ namespace Konbini
                     try { BeginInvoke((Action)(() => { kv.Key.SubItems[3].Text = r; kv.Key.ToolTipText = src + "\n" + r; progress.Value++; if (RunProgress != null) RunProgress(progress.Value, progress.Maximum); })); }
                     catch (InvalidOperationException) { }
                 });
+                // Give the memory back now the batch is done (still on the worker thread, so the UI doesn't stall).
+                Memory.ReleaseAfterRun();
                 try
                 {
                     BeginInvoke((Action)(() =>
@@ -864,6 +866,35 @@ namespace Konbini
         public static OutFormat Resolve(ComboBox c, string src)
         {
             return c.SelectedIndex == 0 ? ImageUtil.FromExtension(src) : (OutFormat)c.SelectedIndex;
+        }
+    }
+
+    /// <summary>Returns memory to Windows after work: unloads AI models, compacts the large-object heap
+    /// (image and tensor buffers live there and .NET never compacts it by itself) and trims the working set.</summary>
+    public static class Memory
+    {
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr min, IntPtr max);
+
+        public static void ReleaseAfterRun()
+        {
+            try { Konbini.Upscale.AiUpscaler.Unload(); } catch { }
+            try { Konbini.BgRemove.BackgroundRemover.Unload(); } catch { }
+            Compact();
+        }
+
+        public static void Compact()
+        {
+            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect();
+            GC.WaitForPendingFinalizers(); // WinRT/GDI+ wrappers release native memory in finalizers
+            GC.Collect();
+            try
+            {
+                using (var p = System.Diagnostics.Process.GetCurrentProcess())
+                    SetProcessWorkingSetSize(p.Handle, (IntPtr)(-1), (IntPtr)(-1));
+            }
+            catch { }
         }
     }
 }

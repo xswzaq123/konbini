@@ -32,6 +32,16 @@ namespace Konbini.Upscale
         }
         public static string Error { get { return loadError; } }
 
+        /// <summary>Frees the loaded model. The next run loads it again.</summary>
+        public static void Unload()
+        {
+            lock (gate)
+            {
+                if (session != null) { try { session.Dispose(); } catch { } session = null; }
+                loadError = null;
+            }
+        }
+
         private static void EnsureLoaded()
         {
             if (session != null || loadError != null) return;

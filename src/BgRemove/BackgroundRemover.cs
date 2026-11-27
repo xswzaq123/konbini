@@ -103,6 +103,19 @@ namespace Konbini.BgRemove
             }
         }
 
+        /// <summary>Frees every loaded model (they hold hundreds of MB to GBs). The next run loads them again.</summary>
+        public static void Unload()
+        {
+            lock (gate)
+            {
+                if (s16 != null) { try { s16.Dispose(); } catch { } s16 = null; }
+                if (s32 != null) { try { s32.Dispose(); } catch { } s32 = null; }
+                err16 = err32 = null;
+                foreach (var s in other.Values) { try { s.Dispose(); } catch { } }
+                other.Clear(); otherDev.Clear();
+            }
+        }
+
         public static bool Available(BgPrecision p)
         {
             lock (gate) { try { Session(p); return true; } catch { return false; } }
