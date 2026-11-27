@@ -24,10 +24,23 @@ namespace Konbini.Upscale
             LearningModel model;
             using (Stream s = dep.Source == Konbini.Deps.DepSource.Embedded ? Konbini.Deps.DepManager.OpenEmbedded(dep) : (Stream)Konbini.Deps.DepManager.Acquire(dep))
             {
-                byte[] bytes;
-                using (var ms = new MemoryStream()) { s.CopyTo(ms); bytes = ms.ToArray(); }
-                model = WinRT.Await(LearningModel.LoadFromStreamAsync(
-                    Windows.Storage.Streams.RandomAccessStreamReference.CreateFromStream(WinRT.FromBytes(bytes))));
+                model = null;
+                var fs = s as FileStream;
+                // Downloaded model: let Windows ML read the verified file itself instead of copying it through managed
+                // memory (that made ~3 copies of a 170-928 MB model). Our Acquire handle stays open meanwhile, so the
+                // file can't be swapped between verification and loading.
+                if (fs != null)
+                {
+                    try { model = LearningModel.LoadFromFilePath(fs.Name); } catch (Exception) { model = null; }
+                }
+                if (model == null)
+                {
+                    byte[] bytes;
+                    if (s.CanSeek) { bytes = new byte[s.Length - s.Position]; int off = 0, n; while (off < bytes.Length && (n = s.Read(bytes, off, bytes.Length - off)) > 0) off += n; }
+                    else using (var ms = new MemoryStream()) { s.CopyTo(ms); bytes = ms.ToArray(); }
+                    model = WinRT.Await(LearningModel.LoadFromStreamAsync(
+                        Windows.Storage.Streams.RandomAccessStreamReference.CreateFromStream(WinRT.FromBytes(bytes))));
+                }
             }
             if (gpu == GpuPolicy.Prefer && !ForceCpu)
             {
@@ -101,10 +114,36 @@ namespace Konbini.Upscale
                 if (known) binding.Bind(output, TensorFloat.Create(os));
             }
             var result = WinRT.Await(session.EvaluateAsync(binding, "run"));
-            var view = ((TensorFloat)result.Outputs[output]).GetAsVectorView();
+            var tensor = (TensorFloat)result.Outputs[output];
+            float[] fast = CopyOut(tensor);
+            if (fast != null) return fast;
+            // Fallback: element by element (each read is a COM call, so this is much slower).
+            var view = tensor.GetAsVectorView();
             var arr = new float[view.Count];
             for (int i = 0; i < arr.Length; i++) arr[i] = view[i];
             return arr;
+        }
+
+        [System.Runtime.InteropServices.ComImport, System.Runtime.InteropServices.Guid("5b0d3235-4dba-4d44-865e-8f1d0e4fd04d"),
+         System.Runtime.InteropServices.InterfaceType(System.Runtime.InteropServices.ComInterfaceType.InterfaceIsIUnknown)]
+        private unsafe interface IMemoryBufferByteAccess { void GetBuffer(out byte* buffer, out uint capacity); }
+
+        /// <summary>Copies the whole tensor in one block through its CPU buffer; null if Windows won't expose it.</summary>
+        private static unsafe float[] CopyOut(TensorFloat t)
+        {
+            try
+            {
+                using (var r = t.CreateReference())
+                {
+                    byte* p; uint cap;
+                    ((IMemoryBufferByteAccess)r).GetBuffer(out p, out cap);
+                    if (p == null || cap == 0) return null;
+                    var arr = new float[cap / 4];
+                    System.Runtime.InteropServices.Marshal.Copy((IntPtr)p, arr, 0, arr.Length);
+                    return arr;
+                }
+            }
+            catch (Exception) { return null; }
         }
     }
 }

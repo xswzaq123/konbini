@@ -68,11 +68,11 @@ namespace Konbini
                 if (m == BgModels.Standard)
                 {
                     var need = BackgroundRemover.NeedsFull((BgPrecision)Math.Max(0, precision.SelectedIndex)) ? Konbini.Deps.Registry.BgFull : Konbini.Deps.Registry.BgFast;
-                    status = Konbini.Deps.DepManager.IsInstalled(need) ? "Downloaded · " + ImageUtil.FormatBytes(need.Size) + "."
+                    status = Konbini.Deps.DepManager.LooksInstalled(need) ? "Downloaded · " + ImageUtil.FormatBytes(need.Size) + "."
                         : "Downloads " + ImageUtil.FormatBytes(need.Size) + " automatically when you start.";
                 }
                 else if (m.Dep.Source == Konbini.Deps.DepSource.Embedded) status = "Built in · " + m.SizeText + ".";
-                else status = Konbini.Deps.DepManager.IsInstalled(m.Dep) ? "Downloaded · " + m.SizeText + "." : "Downloads " + m.SizeText + " automatically when you start.";
+                else status = Konbini.Deps.DepManager.LooksInstalled(m.Dep) ? "Downloaded · " + m.SizeText + "." : "Downloads " + m.SizeText + " automatically when you start.";
                 string why = BgModels.CannotRunReason(m);
                 string slow = why == null && m.GpuMinVram > 0 && !BgModels.UsesGpu(m) ? "  This PC will run it on the processor, so it will be slow." : "";
                 modelInfo.Text = m.For + "\n" + m.Hardware + "\n" + status + slow + (why != null ? "\n⚠ " + why : "");

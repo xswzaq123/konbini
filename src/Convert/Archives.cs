@@ -9,56 +9,54 @@ namespace Konbini.Conversion
     // ZIP / TAR / TAR.GZ / GZ using only the built-in compression streams.
     public static class Archives
     {
-        public class Entry { public string Name; public byte[] Data; public bool IsDir; public DateTime Modified; }
+        // Entries are streamed one at a time from the source archive to the new one, so memory use stays flat no
+        // matter how big the archive is (both ZIP and TAR record each entry's size up front).
+        private delegate void EntrySink(string name, bool isDir, DateTime modified, long size, Stream data);
 
-        public static List<Entry> Read(string path, string id)
+        /// <summary>Converts between archive formats; returns the number of files copied.</summary>
+        public static int Transcode(string src, string srcId, string dst, string dstId)
         {
-            switch (id)
+            int files = 0;
+            switch (dstId)
             {
-                case "zip": return ReadZip(path);
-                case "tar": using (var fs = File.OpenRead(path)) return ReadTar(fs);
-                case "tgz": using (var fs = File.OpenRead(path)) using (var gz = new GZipStream(fs, CompressionMode.Decompress)) return ReadTar(gz);
-                default: throw new NotSupportedException("Can't open ." + id + " archives.");
+                case "zip":
+                    if (File.Exists(dst)) File.Delete(dst);
+                    using (var z = ZipFile.Open(dst, ZipArchiveMode.Create))
+                        ReadEntries(src, srcId, (name, isDir, modified, size, data) =>
+                        {
+                            var ze = z.CreateEntry(isDir ? name.TrimEnd('/') + "/" : name, CompressionLevel.Optimal);
+                            ze.LastWriteTime = modified;
+                            if (!isDir) { using (var o = ze.Open()) CopyN(data, o, size); files++; }
+                        });
+                    break;
+                case "tar": using (var fs = File.Create(dst)) files = WriteTar(src, srcId, fs); break;
+                case "tgz": using (var fs = File.Create(dst)) using (var gz = new GZipStream(fs, CompressionLevel.Optimal)) files = WriteTar(src, srcId, gz); break;
+                default: throw new NotSupportedException("Can't create ." + dstId + " archives.");
             }
+            return files;
         }
 
-        public static void Write(List<Entry> entries, string path, string id)
+        private static void ReadEntries(string path, string id, EntrySink sink)
         {
             switch (id)
             {
                 case "zip":
-                    if (File.Exists(path)) File.Delete(path);
-                    using (var z = ZipFile.Open(path, ZipArchiveMode.Create))
-                        foreach (var e in entries)
+                    using (var z = ZipFile.OpenRead(path))
+                        foreach (var e in z.Entries)
                         {
-                            var ze = z.CreateEntry(e.IsDir ? e.Name.TrimEnd('/') + "/" : e.Name, CompressionLevel.Optimal);
-                            ze.LastWriteTime = e.Modified;
-                            if (!e.IsDir) using (var s = ze.Open()) s.Write(e.Data, 0, e.Data.Length);
+                            bool dir = e.FullName.EndsWith("/");
+                            if (dir) sink(e.FullName, true, e.LastWriteTime.DateTime, 0, Stream.Null);
+                            else using (var s = e.Open()) sink(e.FullName, false, e.LastWriteTime.DateTime, e.Length, s);
                         }
                     break;
-                case "tar": using (var fs = File.Create(path)) WriteTar(entries, fs); break;
-                case "tgz": using (var fs = File.Create(path)) using (var gz = new GZipStream(fs, CompressionLevel.Optimal)) WriteTar(entries, gz); break;
-                default: throw new NotSupportedException("Can't create ." + id + " archives.");
+                case "tar": using (var fs = File.OpenRead(path)) ReadTar(fs, sink); break;
+                case "tgz": using (var fs = File.OpenRead(path)) using (var gz = new GZipStream(fs, CompressionMode.Decompress)) ReadTar(gz, sink); break;
+                default: throw new NotSupportedException("Can't open ." + id + " archives.");
             }
         }
 
-        private static List<Entry> ReadZip(string path)
+        private static void ReadTar(Stream s, EntrySink sink)
         {
-            var list = new List<Entry>();
-            using (var z = ZipFile.OpenRead(path))
-                foreach (var e in z.Entries)
-                {
-                    bool dir = e.FullName.EndsWith("/");
-                    byte[] data = new byte[0];
-                    if (!dir) using (var s = e.Open()) using (var ms = new MemoryStream()) { s.CopyTo(ms); data = ms.ToArray(); }
-                    list.Add(new Entry { Name = e.FullName, Data = data, IsDir = dir, Modified = e.LastWriteTime.DateTime });
-                }
-            return list;
-        }
-
-        private static List<Entry> ReadTar(Stream s)
-        {
-            var list = new List<Entry>();
             var header = new byte[512];
             string longName = null;
             while (ReadFull(s, header, 512) == 512)
@@ -69,25 +67,35 @@ namespace Konbini.Conversion
                 long size = Octal(header, 124, 12);
                 long mtime = Octal(header, 136, 12);
                 char type = (char)header[156];
-                var data = new byte[size];
-                if (ReadFull(s, data, (int)size) != size) throw new InvalidDataException("The TAR file is truncated.");
                 int pad = (int)((512 - size % 512) % 512);
-                if (pad > 0) ReadFull(s, new byte[pad], pad);
-                if (type == 'L') { longName = Encoding.UTF8.GetString(data).TrimEnd('\0'); continue; }
-                if (longName != null) { name = longName; longName = null; }
-                if (type == '0' || type == '\0' || type == '5')
-                    list.Add(new Entry { Name = name, Data = data, IsDir = type == '5' || name.EndsWith("/"),
-                        Modified = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(mtime).ToLocalTime() });
+                if (type == 'L')
+                {
+                    if (size > 1 << 20) throw new InvalidDataException("The TAR file has an invalid long file name.");
+                    var nb = new byte[size];
+                    if (ReadFull(s, nb, (int)size) != size) throw new InvalidDataException("The TAR file is truncated.");
+                    longName = Encoding.UTF8.GetString(nb).TrimEnd('\0');
+                }
+                else
+                {
+                    if (longName != null) { name = longName; longName = null; }
+                    var body = new Limited(s, size);
+                    if (type == '0' || type == '\0' || type == '5')
+                        sink(name, type == '5' || name.EndsWith("/"),
+                             new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(mtime).ToLocalTime(), size, body);
+                    body.Drain();
+                    if (body.Remaining > 0) throw new InvalidDataException("The TAR file is truncated.");
+                }
+                if (pad > 0 && ReadFull(s, new byte[pad], pad) != pad) break;
             }
-            return list;
         }
 
-        private static void WriteTar(List<Entry> entries, Stream s)
+        private static int WriteTar(string src, string srcId, Stream s)
         {
-            foreach (var e in entries)
+            int files = 0;
+            ReadEntries(src, srcId, (rawName, isDir, modified, size, data) =>
             {
-                string name = e.Name.Replace('\\', '/');
-                if (e.IsDir && !name.EndsWith("/")) name += "/";
+                string name = rawName.Replace('\\', '/');
+                if (isDir && !name.EndsWith("/")) name += "/";
                 byte[] nameBytes = Encoding.UTF8.GetBytes(name);
                 if (nameBytes.Length > 100)
                 {
@@ -96,10 +104,46 @@ namespace Konbini.Conversion
                     s.Write(nameBytes, 0, nameBytes.Length); s.WriteByte(0);
                     Pad(s, nameBytes.Length + 1);
                 }
-                WriteHeader(s, name, e.IsDir ? 0 : e.Data.Length, e.IsDir ? '5' : '0', e.Modified);
-                if (!e.IsDir) { s.Write(e.Data, 0, e.Data.Length); Pad(s, e.Data.Length); }
-            }
+                long len = isDir ? 0 : size;
+                WriteHeader(s, name, len, isDir ? '5' : '0', modified);
+                if (!isDir) { CopyN(data, s, len); Pad(s, len); files++; }
+            });
             s.Write(new byte[1024], 0, 1024);
+            return files;
+        }
+
+        // Copies exactly n bytes (the size the header promised); a short source means a corrupt archive.
+        private static void CopyN(Stream from, Stream to, long n)
+        {
+            var buf = new byte[81920];
+            while (n > 0)
+            {
+                int r = from.Read(buf, 0, (int)Math.Min(buf.Length, n));
+                if (r <= 0) throw new InvalidDataException("The archive is truncated or damaged.");
+                to.Write(buf, 0, r); n -= r;
+            }
+        }
+
+        // Read-only view of the next n bytes of a sequential stream (one TAR entry's data).
+        private sealed class Limited : Stream
+        {
+            private readonly Stream s; public long Remaining;
+            public Limited(Stream s, long n) { this.s = s; Remaining = n; }
+            public override int Read(byte[] b, int o, int c)
+            {
+                if (Remaining <= 0) return 0;
+                int r = s.Read(b, o, (int)Math.Min(c, Remaining)); if (r > 0) Remaining -= r; return r;
+            }
+            public void Drain() { var b = new byte[81920]; while (Remaining > 0 && Read(b, 0, b.Length) > 0) { } }
+            public override bool CanRead { get { return true; } }
+            public override bool CanSeek { get { return false; } }
+            public override bool CanWrite { get { return false; } }
+            public override long Length { get { throw new NotSupportedException(); } }
+            public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+            public override void Flush() { }
+            public override long Seek(long o, SeekOrigin so) { throw new NotSupportedException(); }
+            public override void SetLength(long v) { throw new NotSupportedException(); }
+            public override void Write(byte[] b, int o, int c) { throw new NotSupportedException(); }
         }
 
         private static void WriteHeader(Stream s, string name, long size, char type, DateTime modified)

@@ -165,9 +165,7 @@ namespace Konbini.Conversion
                     }
                     break;
                 case Category.Archive:
-                    var entries = Archives.Read(src, k.Id);
-                    Archives.Write(entries, outPath(), target);
-                    note = "  · " + entries.Count(e => !e.IsDir) + " files";
+                    note = "  · " + Archives.Transcode(src, k.Id, outPath(), target) + " files";
                     break;
                 default:
                     throw new NotSupportedException("No converter for this file type.");

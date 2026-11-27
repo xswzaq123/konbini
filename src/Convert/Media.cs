@@ -25,8 +25,32 @@ namespace Konbini.Conversion
             {
                 try { return ImageUtil.Load(path); } catch { /* fall back to the Windows decoder */ }
             }
-            byte[] png = WinDecodeToPng(File.ReadAllBytes(path));
-            using (var ms = new MemoryStream(png)) using (var img = Image.FromStream(ms)) return new Bitmap(img);
+            return WinDecode(path);
+        }
+
+        // Windows decoder straight into a GDI+ bitmap: no whole-file read, no PNG encode/decode round trip, no extra copy.
+        private static unsafe Bitmap WinDecode(string path)
+        {
+            using (var input = WinRT.Await(WinRT.Open(path).OpenAsync(FileAccessMode.Read)))
+            {
+                WinBitmapDecoder dec;
+                try { dec = WinRT.Await(WinBitmapDecoder.CreateAsync(input)); }
+                catch (Exception) { throw new NotSupportedException("Windows has no decoder for this image type (install the codec from the Microsoft Store, e.g. HEIF/WebP/AV1 Image Extensions)."); }
+                var pd = WinRT.Await(dec.GetPixelDataAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight, new BitmapTransform(),
+                    ExifOrientationMode.RespectExifOrientation, ColorManagementMode.ColorManageToSRgb));
+                byte[] px = pd.DetachPixelData();
+                int w = (int)dec.OrientedPixelWidth, h = (int)dec.OrientedPixelHeight;
+                if (px.Length < (long)w * h * 4) throw new InvalidDataException("Windows returned an incomplete image.");
+                var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                var d = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                try
+                {
+                    for (int y = 0; y < h; y++)
+                        System.Runtime.InteropServices.Marshal.Copy(px, y * w * 4, d.Scan0 + y * d.Stride, w * 4);
+                }
+                finally { bmp.UnlockBits(d); }
+                return bmp;
+            }
         }
 
         public static byte[] WinDecodeToPng(byte[] data)

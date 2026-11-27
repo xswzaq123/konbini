@@ -61,6 +61,34 @@ namespace Konbini.Deps
 
         public static bool IsInstalled(Dependency d) { return Status(d) == DepStatus.Installed; }
 
+        private static readonly HashSet<string> verifying = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>For display only (never before using a file; Acquire always verifies): answers at once without hashing
+        /// on the calling thread. A file not yet verified this session counts as installed while it's hashed in the
+        /// background; StatusChanged fires if that changes the answer.</summary>
+        public static bool LooksInstalled(Dependency d)
+        {
+            if (d.Source == DepSource.Embedded) return IsInstalled(d);
+            string p = InstallPath(d);
+            if (!File.Exists(p)) return false;
+            try
+            {
+                var fi = new FileInfo(p);
+                var key = Tuple.Create(fi.Length, fi.LastWriteTimeUtc);
+                lock (verified) { Tuple<long, DateTime> v; if (verified.TryGetValue(p, out v) && v.Equals(key)) return true; }
+            }
+            catch { return false; }
+            lock (verifying) if (!verifying.Add(p)) return true;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                bool ok = false;
+                try { ok = IsVerified(p, d.Sha256); }
+                finally { lock (verifying) verifying.Remove(p); }
+                if (!ok) Raise(d);
+            });
+            return true;
+        }
+
         private static bool IsVerified(string path, string sha)
         {
             try

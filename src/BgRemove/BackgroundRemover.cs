@@ -21,6 +21,8 @@ namespace Konbini.BgRemove
         private static readonly object gate = new object();
         private static LearningModelSession s16, s32;
         private static string dev16, dev32, err16, err32;
+        // Device the fast model loaded on most recently; kept across Unload so NeedsFull can answer without loading.
+        private static volatile string lastDev16;
 
         public static string LastDevice { get; private set; }
 
@@ -31,8 +33,8 @@ namespace Konbini.BgRemove
             {
                 if (s16 == null && err16 == null && Konbini.Deps.DepManager.IsInstalled(Konbini.Deps.Registry.BgFast))
                 {
-                    try { s16 = WinMl.Load(Konbini.Deps.Registry.BgFast, true, out dev16); }
-                    catch (Exception ex) { err16 = ex.Message; }
+                    try { s16 = WinMl.Load(Konbini.Deps.Registry.BgFast, true, out dev16); lastDev16 = dev16; }
+                    catch (Exception ex) { err16 = ex.Message; lastDev16 = "failed"; }
                 }
                 // Half precision only pays off on a GPU; on CPU, Automatic uses the full-precision model.
                 if (s16 != null && (p == BgPrecision.Fast || dev16 == "GPU")) { LastDevice = dev16 + " · fast"; return s16; }
@@ -58,18 +60,11 @@ namespace Konbini.BgRemove
         {
             if (p == BgPrecision.Full) return true;
             if (p == BgPrecision.Fast) return false;
-            lock (gate)
-            {
-                // Before the fast model is downloaded, decide from the hardware alone.
-                if (s16 == null && !Konbini.Deps.DepManager.IsInstalled(Konbini.Deps.Registry.BgFast))
-                    return WinMl.ForceCpu || WinMl.DedicatedVideoMemory < 1L << 30;
-                if (s16 == null && err16 == null)
-                {
-                    try { s16 = WinMl.Load(Konbini.Deps.Registry.BgFast, true, out dev16); }
-                    catch (Exception ex) { err16 = ex.Message; }
-                }
-                return s16 == null || dev16 != "GPU";
-            }
+            // Never loads the model: this runs on the UI thread (the tool's options), and loading 86 MB there froze it.
+            // Use the device the fast model actually got last time; before it has ever loaded, decide from the hardware.
+            string dev = lastDev16;
+            if (dev != null) return dev != "GPU";
+            return WinMl.ForceCpu || WinMl.DedicatedVideoMemory < 1L << 30;
         }
 
         private static readonly System.Collections.Generic.Dictionary<string, LearningModelSession> other = new System.Collections.Generic.Dictionary<string, LearningModelSession>();
