@@ -21,7 +21,7 @@ namespace Konbini.Setup
 {
     static class Program
     {
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
         public const string AppName = "Konbini";
         const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Konbini";
 

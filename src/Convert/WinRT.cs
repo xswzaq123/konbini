@@ -22,11 +22,25 @@ namespace Konbini.Conversion
             if (i.Status == AsyncStatus.Canceled) throw new OperationCanceledException();
         }
 
-        public static T Await<T>(IAsyncOperation<T> op) { Spin(op, 10 * 60 * 1000); return op.GetResults(); }
-        public static T Await<T, P>(IAsyncOperationWithProgress<T, P> op) { Spin(op, 10 * 60 * 1000); return op.GetResults(); }
-        public static void Await(IAsyncAction op) { Spin(op, 10 * 60 * 1000); op.GetResults(); }
+        // Block on the operation's Completed event (wakes immediately) rather than polling with Sleep, which at the
+        // default 15.6 ms timer resolution added up to ~15 ms to every call (e.g. every AI tile).
+        private static void Wait(IAsyncInfo i, ManualResetEventSlim done, int timeoutMs)
+        {
+            // Not disposed: after a timeout, Completed may still fire later and must not hit a disposed event.
+            if (i.Status == AsyncStatus.Started && !done.Wait(timeoutMs) && i.Status == AsyncStatus.Started)
+            { i.Cancel(); throw new TimeoutException("The operation took too long."); }
+            Spin(i, timeoutMs); // status is final now; this just maps errors and cancellation
+        }
+
+        public static T Await<T>(IAsyncOperation<T> op)
+        { var e = new ManualResetEventSlim(); op.Completed = (a, s) => e.Set(); Wait(op, e, 10 * 60 * 1000); return op.GetResults(); }
+        public static T Await<T, P>(IAsyncOperationWithProgress<T, P> op)
+        { var e = new ManualResetEventSlim(); op.Completed = (a, s) => e.Set(); Wait(op, e, 10 * 60 * 1000); return op.GetResults(); }
+        public static void Await(IAsyncAction op)
+        { var e = new ManualResetEventSlim(); op.Completed = (a, s) => e.Set(); Wait(op, e, 10 * 60 * 1000); op.GetResults(); }
         // Long media transcodes can legitimately take a while.
-        public static void Await<P>(IAsyncActionWithProgress<P> op) { Spin(op, 3 * 60 * 60 * 1000); op.GetResults(); }
+        public static void Await<P>(IAsyncActionWithProgress<P> op)
+        { var e = new ManualResetEventSlim(); op.Completed = (a, s) => e.Set(); Wait(op, e, 3 * 60 * 60 * 1000); op.GetResults(); }
 
         public static StorageFile Open(string path) { return Await(StorageFile.GetFileFromPathAsync(Path.GetFullPath(path))); }
 

@@ -38,7 +38,6 @@ namespace Konbini
             MinimumSize = new Size(860, 560);
             ApplyStartSize();
             Font = Theme.Body;
-            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             sidebar = new Panel { Dock = DockStyle.Left, Width = 232, Padding = new Padding(14, 16, 14, 12), Tag = Theme.SidebarTag };
             var brand = new Label { Text = "◆ Konbini", Dock = DockStyle.Top, Height = 46, ForeColor = Color.White,
@@ -135,6 +134,8 @@ namespace Konbini
             return -1;
         }
 
+        private static readonly Font HeaderFont = new Font("Segoe UI Semibold", 8f);
+
         private void DrawNavItem(object s, DrawItemEventArgs e)
         {
             if (e.Index < 0) return;
@@ -150,7 +151,7 @@ namespace Konbini
             }
             if (tool == null)
             {
-                TextRenderer.DrawText(e.Graphics, (string)item, new Font("Segoe UI Semibold", 8f),
+                TextRenderer.DrawText(e.Graphics, (string)item, HeaderFont,
                     new Rectangle(e.Bounds.X + 4, e.Bounds.Y + 10, e.Bounds.Width, e.Bounds.Height - 10),
                     Theme.SidebarMuted, TextFormatFlags.Left);
             }
@@ -342,7 +343,7 @@ namespace Konbini
                 }
             }
             // Free the cleared thumbnails after the new page has painted, so it doesn't delay the switch.
-            if (cleared) BeginInvoke((Action)(() => GC.Collect()));
+            if (cleared) BeginInvoke((Action)Memory.CompactInBackground);
         }
 
         private const int WM_SETREDRAW = 0x000B;

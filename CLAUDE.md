@@ -44,6 +44,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\edge.ps1 <folder with 
   - `RunModel` falls back to the CPU if a GPU run fails.
 - **Testing:** **don't run BiRefNet inference on the user's machine**, as they asked. `tests\bgremove.ps1` tests only Lite by default; `-models high,max` is opt-in. `tests\deps.ps1` checks only the download.
 - **Shared pipeline:** after inference, every model goes through the same steps: min-max normalisation, guided-filter refinement, decontamination and `Compose`.
+- **Memory:** `Memory.ReleaseAfterRun` (Core.cs) compacts the heap when a batch ends and unloads the AI models after 60 s idle (`RunStarting` cancels that). `NeedsFull` and the tool's status text must never load a model or hash a file on the UI thread: use `lastDev16` and `DepManager.LooksInstalled`. Downloaded models load with `LearningModel.LoadFromFilePath` while the `Acquire` handle is held; `WinMl.Run` copies outputs in one block through `IMemoryBufferByteAccess`.
 - **Tensor names:** for non-Standard models they're read from `session.Model`. `WinMl.Run` binds the wanted output explicitly, because U²-Net has seven outputs.
 - **Standard precision:** the half-precision copy was made by `tools\convert-fp16.py`. That script must keep `Resize` in full precision and use onnxruntime's converter. `BgPrecision` applies to Standard only: Automatic uses fp16 on a GPU and fp32 on a CPU; before fp16 is installed, `NeedsFull` decides from `WinMl.DedicatedVideoMemory`. Only the needed file is downloaded. The file to upload, its hash and the steps are in `hosting\README.md`.
 - **Adding a model:**
@@ -75,7 +76,7 @@ The version lives in `src\AppInfo.cs` (`AppInfo.Version`) and in `installer\Setu
 ## Language and API constraints
 
 - **C# 5 only.** The in-box csc doesn't support `$""` strings, `?.`, `nameof`, expression-bodied members or `out var`.
-- **WinRT async: never use `AsTask()`.** It needs the SDK-only `Windows.winmd`. Use the spin-wait `WinRT.Await(...)` helpers in `src/Convert/WinRT.cs`, plus `WinRT.Open`, `WinRT.Create`, `WinRT.ReadAll` and `WinRT.FromBytes`.
+- **WinRT async: never use `AsTask()`.** It needs the SDK-only `Windows.winmd`. Use the `WinRT.Await(...)` helpers (they block on the operation's `Completed` event) in `src/Convert/WinRT.cs`, plus `WinRT.Open`, `WinRT.Create`, `WinRT.ReadAll` and `WinRT.FromBytes`.
 - File formats are hand-written; there are no libraries for them:
   - PDF writer: `PdfWriter.cs`
   - OpenXML docx/xlsx: `Documents.cs`, `Data.cs`
@@ -100,7 +101,7 @@ The version lives in `src\AppInfo.cs` (`AppInfo.Version`) and in `installer\Setu
 - **Adding a tool:** implement `ITool` (`Name`, `Category`, `Description`, `CreateView()`), then register it in `ToolRegistry.All()` in `src/Core.cs`.
 - **`BatchImagePanel`** (`src/Core.cs`) is the shared batch UI that every tool reuses. It provides:
   - a toolbar for add, add folder, remove and clear
-  - a ListView that switches between list and thumbnail views, with a background thumbnail worker
+  - a ListView that switches between list and thumbnail views, with up to 3 background thumbnail workers. Thumbnails are decoded by Windows Imaging at thumbnail size (`ImageUtil.WicThumb`), because GDI+ decoding holds a process-wide lock that freezes the UI's painting; GDI+ is only the fallback. Results are applied in batches (`FlushThumbs`), and image-list slots are reserved by doubling (`AddThumbImages`), because `ImageList.Images.Add` is O(n²) for big lists
   - Options and Output cards
   - a progress bar, and a run button that processes files in parallel (`Parallel.ForEach`, at most 4 workers)
 

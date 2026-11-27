@@ -130,6 +130,10 @@ namespace Konbini
         // Also returns the true (orientation-corrected) dimensions. Returns null if unreadable.
         public static Bitmap MakeThumb(string path, int box, out Size size)
         {
+            // Windows Imaging first: it decodes straight to thumbnail size (JPEG scales in the DCT, ~5-10x less work)
+            // and, unlike GDI+, doesn't hold a process-wide lock that freezes the UI thread's painting meanwhile.
+            Bitmap wic = WicThumb(path, box, out size);
+            if (wic != null) return wic;
             size = Size.Empty;
             try
             {
@@ -160,6 +164,53 @@ namespace Konbini
                 }
             }
             catch { return null; }
+        }
+
+        private static unsafe Bitmap WicThumb(string path, int box, out Size size)
+        {
+            size = Size.Empty;
+            try
+            {
+                var file = Konbini.Conversion.WinRT.Open(path);
+                using (var ras = Konbini.Conversion.WinRT.Await(file.OpenAsync(Windows.Storage.FileAccessMode.Read)))
+                {
+                    var dec = Konbini.Conversion.WinRT.Await(Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(ras));
+                    uint pw = dec.PixelWidth, ph = dec.PixelHeight, ow = dec.OrientedPixelWidth, oh = dec.OrientedPixelHeight;
+                    if (pw == 0 || ph == 0) return null;
+                    double sc = Math.Min(1.0, Math.Min((double)box / ow, (double)box / oh));
+                    // The transform scales the stored pixels; orientation is applied afterwards.
+                    var tr = new Windows.Graphics.Imaging.BitmapTransform
+                    {
+                        ScaledWidth = (uint)Math.Max(1, (int)(pw * sc)), ScaledHeight = (uint)Math.Max(1, (int)(ph * sc)),
+                        InterpolationMode = Windows.Graphics.Imaging.BitmapInterpolationMode.Fant
+                    };
+                    bool swap = ow != pw;
+                    int w = (int)(swap ? tr.ScaledHeight : tr.ScaledWidth), h = (int)(swap ? tr.ScaledWidth : tr.ScaledHeight);
+                    var pd = Konbini.Conversion.WinRT.Await(dec.GetPixelDataAsync(Windows.Graphics.Imaging.BitmapPixelFormat.Bgra8,
+                        Windows.Graphics.Imaging.BitmapAlphaMode.Straight, tr,
+                        Windows.Graphics.Imaging.ExifOrientationMode.RespectExifOrientation,
+                        Windows.Graphics.Imaging.ColorManagementMode.ColorManageToSRgb));
+                    byte[] bytes = pd.DetachPixelData();
+                    if (bytes.Length < w * h * 4) return null;
+                    var t = new Bitmap(box, box, PixelFormat.Format32bppArgb);
+                    var d = t.LockBits(new Rectangle(0, 0, box, box), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        byte* dst = (byte*)d.Scan0; int ox = (box - w) / 2, oy = (box - h) / 2;
+                        for (int y = 0; y < box; y++)
+                        {
+                            byte* row = dst + y * d.Stride;
+                            for (int i = 0; i < box * 4; i++) row[i] = 0; // transparent padding
+                            if (y >= oy && y < oy + h)
+                                System.Runtime.InteropServices.Marshal.Copy(bytes, (y - oy) * w * 4, (IntPtr)(row + ox * 4), w * 4);
+                        }
+                    }
+                    finally { t.UnlockBits(d); }
+                    size = new Size((int)ow, (int)oh);
+                    return t;
+                }
+            }
+            catch { size = Size.Empty; return null; }
         }
 
         private static readonly ImageCodecInfo JpegCodec =
@@ -268,8 +319,18 @@ namespace Konbini
         private readonly HashSet<string> files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private const int ThumbSize = 128;
         private readonly ImageList thumbs;
+        // Path -> index in thumbs. The image list only grows (cleared when the list empties), so indexes stay valid;
+        // this avoids ImageList's linear key search, which made big batches O(n²).
+        private readonly Dictionary<string, int> thumbIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Finished thumbnails waiting to be applied in one batch on the UI thread.
+        private readonly Queue<Tuple<string, Bitmap, Size, string>> thumbDone = new Queue<Tuple<string, Bitmap, Size, string>>();
+        private bool thumbFlushPosted;
+        // Native image-list slots in use; capacity beyond this is reserved, blank and unreferenced.
+        private int thumbUsed;
         private readonly Queue<string> thumbQueue = new Queue<string>();
-        private bool thumbWorkerRunning;
+        private int thumbWorkers;
+        // Windows Imaging decodes without GDI+'s process-wide lock, so a few workers genuinely run in parallel.
+        private static readonly int MaxThumbWorkers = Math.Max(1, Math.Min(3, Environment.ProcessorCount / 2));
         private Label dropHint;
         private readonly Dictionary<string, ListViewItem> itemsByPath = new Dictionary<string, ListViewItem>(StringComparer.OrdinalIgnoreCase);
         private readonly List<Button> toolbarButtons = new List<Button>();
@@ -618,15 +679,16 @@ namespace Konbini
         // Builds thumbnails + reads dimensions off the UI thread so large batches stay responsive.
         private void StartThumbWorker()
         {
-            lock (thumbQueue) { if (thumbWorkerRunning || thumbQueue.Count == 0) return; thumbWorkerRunning = true; }
-            new Thread(() =>
+            int start;
+            lock (thumbQueue) { start = Math.Min(MaxThumbWorkers, thumbQueue.Count) - thumbWorkers; if (start <= 0) return; thumbWorkers += start; }
+            for (int n = 0; n < start; n++) new Thread(() =>
             {
                 while (true)
                 {
                     string f;
                     lock (thumbQueue)
                     {
-                        if (thumbQueue.Count == 0) { thumbWorkerRunning = false; return; }
+                        if (thumbQueue.Count == 0) { thumbWorkers--; return; }
                         f = thumbQueue.Dequeue();
                     }
                     Size size;
@@ -640,10 +702,71 @@ namespace Konbini
                         if (thumb == null) thumb = ImageUtil.IconThumb(f, ThumbSize);
                     }
                     if (IsDisposed) return;
-                    try { BeginInvoke((Action)(() => ApplyThumb(f, thumb, size, desc))); }
-                    catch (InvalidOperationException) { if (thumb != null) thumb.Dispose(); return; }
+                    bool post;
+                    lock (thumbDone) { thumbDone.Enqueue(Tuple.Create(f, thumb, size, desc)); post = !thumbFlushPosted; thumbFlushPosted = true; }
+                    if (post)
+                    {
+                        try { BeginInvoke((Action)FlushThumbs); }
+                        catch (InvalidOperationException) { DisposePendingThumbs(); return; }
+                    }
                 }
             }) { IsBackground = true, Priority = ThreadPriority.BelowNormal }.Start();
+        }
+
+        // Applies every finished thumbnail in one list update and raises ItemsChanged once, instead of a repaint,
+        // column refit and ItemsChanged per file.
+        private void FlushThumbs()
+        {
+            Tuple<string, Bitmap, Size, string>[] batch;
+            lock (thumbDone) { batch = thumbDone.ToArray(); thumbDone.Clear(); thumbFlushPosted = false; }
+            if (batch.Length == 0) return;
+            if (IsDisposed) { foreach (var t in batch) if (t.Item2 != null) t.Item2.Dispose(); return; }
+            AddThumbImages(batch);
+            List.BeginUpdate();
+            try { foreach (var t in batch) ApplyThumb(t.Item1, t.Item2, t.Item3, t.Item4); }
+            finally { List.EndUpdate(); }
+            RaiseItemsChanged();
+        }
+
+        [System.Runtime.InteropServices.DllImport("comctl32.dll")] private static extern bool ImageList_SetImageCount(IntPtr himl, uint count);
+        [System.Runtime.InteropServices.DllImport("comctl32.dll")] private static extern bool ImageList_Replace(IntPtr himl, int i, IntPtr image, IntPtr mask);
+        [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr h);
+
+        // ImageList.Images.Add grows the native list 4 slots at a time (copying every image each time) and makes the
+        // ListView re-walk all items per add: O(n²) for big batches. Reserve the whole batch's slots once and fill them
+        // natively, using the same colour/mask conversion WinForms uses.
+        private void AddThumbImages(Tuple<string, Bitmap, Size, string>[] batch)
+        {
+            var fresh = new List<Tuple<string, Bitmap, Size, string>>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var t in batch)
+            {
+                ListViewItem it;
+                if (t.Item2 != null && !thumbIndex.ContainsKey(t.Item1) && seen.Add(t.Item1)
+                    && itemsByPath.TryGetValue(t.Item1, out it) && it.ListView != null) fresh.Add(t);
+            }
+            if (fresh.Count == 0) return;
+            IntPtr h = thumbs.Handle;
+            int start = thumbUsed, need = start + fresh.Count, cap = thumbs.Images.Count;
+            // Double the capacity when it runs out, so growing to n images costs O(n) copying in total.
+            if (need > cap && !ImageList_SetImageCount(h, (uint)Math.Max(need, Math.Max(16, cap * 2)))) return; // ApplyThumb falls back
+            thumbUsed = need;
+            for (int k = 0; k < fresh.Count; k++)
+            {
+                IntPtr mask = IntPtr.Zero, color = IntPtr.Zero;
+                try
+                {
+                    mask = ControlPaint.CreateHBitmapTransparencyMask(fresh[k].Item2);
+                    color = ControlPaint.CreateHBitmapColorMask(fresh[k].Item2, mask);
+                    if (ImageList_Replace(h, start + k, color, mask)) thumbIndex[fresh[k].Item1] = start + k;
+                }
+                finally { if (color != IntPtr.Zero) DeleteObject(color); if (mask != IntPtr.Zero) DeleteObject(mask); }
+            }
+        }
+
+        private void DisposePendingThumbs()
+        {
+            lock (thumbDone) { foreach (var t in thumbDone) if (t.Item2 != null) t.Item2.Dispose(); thumbDone.Clear(); thumbFlushPosted = false; }
         }
 
         private void ApplyThumb(string f, Bitmap thumb, Size size, string desc)
@@ -652,9 +775,8 @@ namespace Konbini
             if (!itemsByPath.TryGetValue(f, out it) || it.ListView == null) { if (thumb != null) thumb.Dispose(); return; }
             it.SubItems[1].Text = desc ?? (size.IsEmpty ? "unreadable" : size.Width + " × " + size.Height);
             sizesByPath[f] = size;
-            RaiseItemsChanged();
             if (thumb == null) return;
-            if (!thumbs.Images.ContainsKey(f)) thumbs.Images.Add(f, thumb);
+            if (!thumbIndex.ContainsKey(f)) { thumbs.Images.Add(thumb); thumbUsed = thumbs.Images.Count; thumbIndex[f] = thumbUsed - 1; } // fallback path
             thumb.Dispose(); // ImageList keeps its own copy
             RefreshImage(it);
         }
@@ -662,10 +784,10 @@ namespace Konbini
         // The native item caches its image index; re-assign so it picks up the current thumbnail.
         private void RefreshImage(ListViewItem it)
         {
-            string f = (string)it.Tag;
-            if (!thumbs.Images.ContainsKey(f)) return;
-            it.ImageKey = "";
-            it.ImageKey = f;
+            int idx;
+            if (!thumbIndex.TryGetValue((string)it.Tag, out idx)) return;
+            it.ImageIndex = -1;
+            it.ImageIndex = idx;
         }
 
         // Gives each output a unique path within a run (e.g. a.png and a.jpg both converted to a.jpg).
@@ -742,7 +864,7 @@ namespace Konbini
                 files.Remove(f); itemsByPath.Remove(f); sizesByPath.Remove(f); List.Items.Remove(it);
             }
             List.EndUpdate();
-            if (List.Items.Count == 0) thumbs.Images.Clear(); // safe only when no item references an index
+            if (List.Items.Count == 0) { thumbs.Images.Clear(); thumbIndex.Clear(); thumbUsed = 0; } // safe only when no item references an index
             UpdateStatus();
             RaiseItemsChanged();
         }
@@ -792,6 +914,7 @@ namespace Konbini
                     "Konbini", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             allowOverwrite = WarnOnEmptySuffix && dir == null && string.IsNullOrEmpty(sfx);
             cancelRequested = false; closeWhenStopped = false;
+            Memory.RunStarting();
 
             var items = List.Items.Cast<ListViewItem>().Select(i => new KeyValuePair<ListViewItem, string>(i, (string)i.Tag)).ToList();
             foreach (var kv in items) kv.Key.SubItems[3].Text = "Waiting…";
@@ -826,6 +949,8 @@ namespace Konbini
                     try { BeginInvoke((Action)(() => { kv.Key.SubItems[3].Text = r; kv.Key.ToolTipText = src + "\n" + r; progress.Value++; if (RunProgress != null) RunProgress(progress.Value, progress.Maximum); })); }
                     catch (InvalidOperationException) { }
                 });
+                // Give the memory back now the batch is done (still on the worker thread, so the UI doesn't stall).
+                Memory.ReleaseAfterRun();
                 try
                 {
                     BeginInvoke((Action)(() =>
@@ -864,6 +989,59 @@ namespace Konbini
         public static OutFormat Resolve(ComboBox c, string src)
         {
             return c.SelectedIndex == 0 ? ImageUtil.FromExtension(src) : (OutFormat)c.SelectedIndex;
+        }
+    }
+
+    /// <summary>Returns memory to Windows after work: unloads AI models, compacts the large-object heap
+    /// (image and tensor buffers live there and .NET never compacts it by itself) and trims the working set.</summary>
+    public static class Memory
+    {
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr min, IntPtr max);
+
+        // Models stay loaded this long after a run, so back-to-back runs don't reload them (seconds on a GPU).
+        private const int UnloadAfterMs = 60 * 1000;
+        private static readonly System.Threading.Timer unloadTimer = new System.Threading.Timer(_ => UnloadModels(), null, Timeout.Infinite, Timeout.Infinite);
+        private static int running;
+
+        /// <summary>Call when a batch starts: keeps the models loaded while it runs.</summary>
+        public static void RunStarting()
+        {
+            Interlocked.Increment(ref running);
+            unloadTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        }
+
+        /// <summary>Call when a batch ends: frees its buffers now and the AI models once the app has been idle a minute.</summary>
+        public static void ReleaseAfterRun()
+        {
+            if (Interlocked.Decrement(ref running) < 0) Interlocked.Exchange(ref running, 0);
+            Compact();
+            unloadTimer.Change(UnloadAfterMs, Timeout.Infinite);
+        }
+
+        private static void UnloadModels()
+        {
+            if (Volatile.Read(ref running) > 0) return;
+            try { Konbini.Upscale.AiUpscaler.Unload(); } catch { }
+            try { Konbini.BgRemove.BackgroundRemover.Unload(); } catch { }
+            Compact();
+        }
+
+        /// <summary>Compaction off the UI thread (it waits for finalizers and trims the working set).</summary>
+        public static void CompactInBackground() { ThreadPool.QueueUserWorkItem(_ => Compact()); }
+
+        public static void Compact()
+        {
+            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect();
+            GC.WaitForPendingFinalizers(); // WinRT/GDI+ wrappers release native memory in finalizers
+            GC.Collect();
+            try
+            {
+                using (var p = System.Diagnostics.Process.GetCurrentProcess())
+                    SetProcessWorkingSetSize(p.Handle, (IntPtr)(-1), (IntPtr)(-1));
+            }
+            catch { }
         }
     }
 }

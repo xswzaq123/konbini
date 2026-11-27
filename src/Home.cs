@@ -276,8 +276,14 @@ namespace Konbini
             body.RowStyles[1].Height = any ? ListHeight : 0;
             staging.Visible = any;
             zone.Compact = any;
+            // ItemsChanged also fires as thumbnails and sizes arrive; only a different set of files needs re-analysis
+            // (each analysis opens every file).
+            var now = new HashSet<string>(staging.Files, StringComparer.OrdinalIgnoreCase);
+            if (analysedSet != null && analysedSet.SetEquals(now)) return;
+            analysedSet = now;
             reanalyse.Stop(); reanalyse.Start();
         }
+        private HashSet<string> analysedSet;
 
         /// <summary>Classifies the listed files off the UI thread, then shows the suggestions.</summary>
         private void AnalyseStaged()
